@@ -13,6 +13,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+
+      - name: Validate Firebase service account secret
+        env:
+          FIREBASE_SA: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_SPEAKOZY_94075 }}
+        run: |
+          node -e 'const s=process.env.FIREBASE_SA||""; try { const j=JSON.parse(s); console.log("JSON valid:",true); console.log("Has client_email:",Boolean(j.client_email)); console.log("Service account:",j.type==="service_account"); } catch(e) { console.log("JSON valid:",false); console.log("Secret length:",s.length); }'
+
       - name: Deploy to Firebase Hosting
         uses: FirebaseExtended/action-hosting-deploy@v0
         with:
