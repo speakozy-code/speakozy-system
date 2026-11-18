@@ -1,0 +1,35 @@
+{
+  "id": "/",
+  "name": "Speakozy",
+  "short_name": "Speakozy",
+  "description": "نظام إدارة Speakozy",
+  "lang": "ar",
+  "dir": "rtl",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "theme_color": "#1e2d4d",
+  "background_color": "#f4f7fa",
+  "categories": ["education", "business", "productivity"],
+  "icons": [
+    {
+      "src": "/icons/speakozy-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/speakozy-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/speakozy-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

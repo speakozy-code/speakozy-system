@@ -1,0 +1,54 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function isOwner() { return signedIn() && request.auth.uid == "v7ZVytiEpOXIwJMkxNB5xLblbb62"; }
+    function roleIs(r) {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == r;
+    }
+    function isAdmin() { return roleIs("admin"); }
+    function isTeacher() { return roleIs("teacher"); }
+
+    match /users/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || isOwner() || isAdmin());
+      allow write: if isOwner();
+    }
+    match /hub/main {
+      allow read, create, update: if isOwner() || isAdmin();
+      allow delete: if false;
+    }
+    match /hub/finance {
+      allow read, create, update: if isOwner();
+      allow delete: if false;
+    }
+    match /hubBackups/{id} {
+      allow read, create: if isOwner() || isAdmin();
+      allow update, delete: if false;
+    }
+    match /finBackups/{id} {
+      allow read, create: if isOwner();
+      allow update, delete: if false;
+    }
+    match /teachers/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || isOwner() || isAdmin());
+      allow create, update: if isOwner() || isAdmin();
+      allow delete: if false;
+    }
+    match /attendance/{id} {
+      allow read: if isOwner() || isAdmin()
+        || (isTeacher() && resource.data.teacherUid == request.auth.uid);
+      allow create, update: if isOwner() || isAdmin();
+      allow create: if isTeacher()
+        && request.resource.data.teacherUid == request.auth.uid
+        && request.resource.data.gid in get(/databases/$(database)/documents/teachers/$(request.auth.uid)).data.gids;
+      allow update: if isTeacher()
+        && resource.data.teacherUid == request.auth.uid
+        && request.resource.data.teacherUid == request.auth.uid
+        && request.resource.data.gid in get(/databases/$(database)/documents/teachers/$(request.auth.uid)).data.gids;
+      allow delete: if false;
+    }
+    match /{document=**} { allow read, write: if false; }
+  }
+}

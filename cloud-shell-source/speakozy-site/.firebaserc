@@ -1,0 +1,15 @@
+{
+  "projects": {
+    "default": "speakozy-94075"
+  },
+  "targets": {
+    "speakozy-94075": {
+      "hosting": {
+        "main": [
+          "speakozy"
+        ]
+      }
+    }
+  },
+  "etags": {}
+}
