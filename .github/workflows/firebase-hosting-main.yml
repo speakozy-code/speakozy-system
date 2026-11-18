@@ -1,24 +1,48 @@
-name: Deploy Speakozy to Firebase Hosting
+name: Build and Deploy Speakozy to Firebase Hosting
 
 on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 jobs:
-  deploy:
+  build-and-deploy:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: speakozy-source
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.25.0
 
-      - name: Validate Firebase service account secret
-        env:
-          FIREBASE_SA: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_SPEAKOZY_94075 }}
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: speakozy-source/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run domain tests
+        run: pnpm test
+
+      - name: Build site
+        run: pnpm build
+
+      - name: Publish build to hosting directory
         run: |
-          node -e 'const s=process.env.FIREBASE_SA||""; try { const j=JSON.parse(s); console.log("JSON valid:",true); console.log("Has client_email:",Boolean(j.client_email)); console.log("Service account:",j.type==="service_account"); } catch(e) { console.log("JSON valid:",false); console.log("Secret length:",s.length); }'
+          rm -rf ../public
+          mkdir -p ../public
+          cp -r dist/. ../public/
 
       - name: Deploy to Firebase Hosting
         uses: FirebaseExtended/action-hosting-deploy@v0
