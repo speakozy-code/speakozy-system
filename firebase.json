@@ -1,0 +1,29 @@
+{
+  "hosting": {
+    "target": "main",
+    "public": "public",
+    "ignore": [
+      "**/*.backup*",
+      "**/*.bak*",
+      "**/*.before-*",
+      "**/.*",
+      "**/node_modules/**",
+      "firebase.json"
+    ],
+    "headers": [
+      {
+        "source": "**/*.@(html|js)",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "no-cache"
+          }
+        ]
+      }
+    ]
+  },
+  "firestore": {
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json"
+  }
+}
