@@ -1,4 +1,4 @@
-import { type ElementType, type FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { memo, type ElementType, type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArchiveRestore, ArrowUp, BarChart3, Bell, BellRing, BookOpenCheck, CalendarDays, Check, ChevronDown,
   ClipboardCheck, Copy, DollarSign, FileDown, GraduationCap, LayoutDashboard, ListChecks,
@@ -12,6 +12,7 @@ import { allTeacherScheduleConflicts, cancelSession, durationHours, ensureEightA
 import { isGroupOperationalToday } from "../domain/lifecycle";
 import { retentionByMonth } from "../domain/retention";
 import { dataQualityIssues } from "../domain/data-quality";
+import { AUTOMATIC_LEAD_FOLLOWUP_INTERVAL_MS, AUTOMATIC_STUDENT_FOLLOWUP_INTERVAL_MS, isAutomaticFollowupDue } from "../domain/followup";
 import type { CloudBackup } from "../services/cloudRepository";
 
 type Tab = "home" | "report" | "groups" | "private" | "next" | "leads" | "attendance" | "teachers" | "finance" | "retention" | "security" | "marketing" | "scripts";
@@ -97,7 +98,10 @@ function displayGroupLabel(group: AcademyGroup, data: AcademyData) {
   return groupLabel({ ...group, tc: teacherDisplayName(data, group.tc) });
 }
 
-const AUTO_FOLLOWUP_INTERVAL = 7 * 24 * 60 * 60 * 1000;
+function StudentNameWithNote({ name, note }: { name: string; note?: string }) {
+  const value = String(note ?? "").trim();
+  return <strong><span>{name}</span>{value && <small className="student-card__note" title={`ملاحظة: ${value}`}>ملاحظة: {value}</small>}</strong>;
+}
 
 function addIsoDays(value: string, days: number): string {
   const date = parseIsoDate(value);
@@ -115,9 +119,11 @@ function followupTouchTime(item: { fu?: number; lu?: number; followupDoneAt?: nu
 }
 
 function followupDueEverySevenDays(item: { fu?: number; lu?: number; followupDoneAt?: number; ts?: number; formerAt?: number; fh?: unknown[] }, dueDate: string, now: Date, today: string): boolean {
-  if (dueDate && dueDate > today) return false;
-  const lastTouch = followupTouchTime(item);
-  return !lastTouch || now.getTime() - lastTouch >= AUTO_FOLLOWUP_INTERVAL;
+  return isAutomaticFollowupDue(followupTouchTime(item), dueDate, now.getTime(), today, AUTOMATIC_LEAD_FOLLOWUP_INTERVAL_MS);
+}
+
+function followupDueEveryFourteenDays(item: { fu?: number; lu?: number; followupDoneAt?: number; ts?: number; formerAt?: number; fh?: unknown[] }, dueDate: string, now: Date, today: string): boolean {
+  return isAutomaticFollowupDue(followupTouchTime(item), dueDate, now.getTime(), today, AUTOMATIC_STUDENT_FOLLOWUP_INTERVAL_MS);
 }
 
 function matchingLevel(value: unknown): string {
@@ -129,8 +135,7 @@ function deriveNotices(data: AcademyData, role: Role, teacherName?: string): App
   if (role === "teacher" && (!teacherKey || isTeacherNameArchived(data, teacherName))) return [];
   const now = new Date();
   const today = toIsoDate(now);
-  const cooldown = AUTO_FOLLOWUP_INTERVAL;
-  const recent = (item: { fu?: number; lu?: number; followupDoneAt?: number; ts?: number; formerAt?: number; fh?: unknown[] }) => {
+  const recent = (item: { fu?: number; lu?: number; followupDoneAt?: number; ts?: number; formerAt?: number; fh?: unknown[] }, cooldown = AUTOMATIC_LEAD_FOLLOWUP_INTERVAL_MS) => {
     const stamp = followupTouchTime(item);
     return stamp > 0 && now.getTime() - stamp < cooldown;
   };
@@ -265,8 +270,8 @@ function deriveNotices(data: AcademyData, role: Role, teacherName?: string): App
     const due = String(student.fd ?? "");
     if (due && due > today) return;
     const group = groupMap.get(student.g);
-    const dueText = due && due <= today ? `متابعة مستحقة ${formatDate(due)}` : "متابعة دورية كل أسبوع";
-    if (due && due <= today || !recent(student) && followupDueEverySevenDays(student, due, now, today)) {
+    const dueText = due && due <= today ? `متابعة مستحقة ${formatDate(due)}` : "متابعة دورية كل أسبوعين";
+    if ((due && due <= today) || followupDueEveryFourteenDays(student, due, now, today)) {
       notices.push({ id: `former-${student.id}`, kind: "student", title: student.n || "عميل قديم", description: `${dueText}${student.lv ? ` · المستوى ${student.lv}` : ""}${group ? ` · ${displayGroupLabel(group, data)}` : " · عملاء الراوند الجاي"}`, phone: student.ph, studentId: student.id, targetTab: "next" });
     }
   });
@@ -290,7 +295,7 @@ function AppShell() {
   const [noticeFocus, setNoticeFocus] = useState<NoticeFocus | null>(null);
   const [groupFocusId, setGroupFocusId] = useState("");
   const [showScrollTop, setShowScrollTop] = useState(false);
-  const [, setNoticePulse] = useState(0);
+  const [noticePulse, setNoticePulse] = useState(0);
   const [noticePosition, setNoticePosition] = useState({ top: 82, right: 265 });
   const notificationButton = useRef<HTMLButtonElement | null>(null);
   const { profile, data } = academy;
@@ -379,7 +384,7 @@ function AppShell() {
   if (!profile) return <Loading />;
 
   const tabs = visibleTabs(profile.role);
-  const notices = deriveNotices(data, profile.role, profile.teacherName);
+  const notices = useMemo(() => deriveNotices(data, profile.role, profile.teacherName), [data, profile.role, profile.teacherName, noticePulse]);
   const chooseTab = (next: Tab) => { setTab(next); setDrawer(false); setNoticesOpen(false); if (next === "attendance") setSelectedGroup(""); };
   const openAttendance = (groupId?: string) => { setSelectedGroup(groupId ?? ""); setTab("attendance"); setDrawer(false); setNoticesOpen(false); };
   const openTeacherGroup = (requested: AcademyGroup) => {
@@ -1228,8 +1233,9 @@ function FollowupControls({ record, data, onSave }: { record: FollowupRecord; da
   return <details className="followup-controls"><summary>{date ? `فولو أب: ${formatDate(date)}` : "إضافة / تحديث فولو أب"}</summary><div className="field" style={{ marginTop: 8 }}><label>ملاحظة التواصل (اختياري)</label><input value={note} onChange={(event) => setNote(event.target.value)} placeholder="ماذا تم في المتابعة؟" /></div><div className="toolbar" style={{ marginTop: 8 }}><button className="btn btn--ghost btn--small" onClick={() => quick(3)}>كمان 3 أيام</button><button className="btn btn--ghost btn--small" onClick={() => quick(7)}>كمان أسبوع</button><button className="btn btn--ghost btn--small" onClick={() => quick(14)}>كمان أسبوعين</button>{nextRound && <button className="btn btn--ghost btn--small" onClick={() => { setDate(nextRound); onSave(nextRound, note); }}>الراوند الجاي</button>}</div><div className="toolbar"><input type="date" value={date} onChange={(event) => setDate(event.target.value)} /><button className="btn btn--small" disabled={!date} onClick={() => onSave(date, note)}>حفظ التاريخ</button><button className="btn btn--ghost btn--small" onClick={() => { setDate(""); onSave("", note || "تم"); }}>خلص بدون فولو أب</button></div>{history.map((entry, index) => { const stamp = Number(entry.t ?? entry.at); return <p className="followup-history" key={`${stamp}-${index}`}>• {stamp ? formatDate(toIsoDate(new Date(stamp))) : "تواصل سابق"} · {String(entry.n ?? "تواصل")}{entry.to ? ` ← الجاي ${String(entry.to)}` : ""}</p>; })}</details>;
 }
 
-function StudentRow({ student, index, toneIndex = index, canEditPayment, canEditRenewal, commit, data, showLevelCount = false, groupSummary, privateDetails }: { student: Student; index: number; toneIndex?: number; canEditPayment: boolean; canEditRenewal: boolean; commit: Commit; data: AcademyData; showLevelCount?: boolean; groupSummary?: AcademyGroup; privateDetails?: AcademyGroup }){
+const StudentRow = memo(function StudentRow({ student, index, toneIndex = index, canEditPayment, canEditRenewal, commit, data, showLevelCount = false, groupSummary, privateDetails }: { student: Student; index: number; toneIndex?: number; canEditPayment: boolean; canEditRenewal: boolean; commit: Commit; data: AcademyData; showLevelCount?: boolean; groupSummary?: AcademyGroup; privateDetails?: AcademyGroup }) {
   const [editing, setEditing] = useState(false);
+  const [transferOpen, setTransferOpen] = useState(false);
   const [targetGroup, setTargetGroup] = useState("");
   const [targetEnrollmentType, setTargetEnrollmentType] = useState<"" | "group" | "private">("");
   const [targetRoundId, setTargetRoundId] = useState("");
@@ -1244,8 +1250,8 @@ function StudentRow({ student, index, toneIndex = index, canEditPayment, canEdit
   const [amount, setAmount] = useState(String(student.amount ?? ""));
   const [remaining, setRemaining] = useState(String(student.pn ?? ""));
   const displayedPrivateDetails = groupSummary ?? privateDetails;
-  const transferRounds = live(data.r).filter((round) => !round.pl && activeGroups(data).some((group) => !group.p && group.r === round.id && isGroupOperationalToday(group))).sort((a, b) => String(a.s ?? "").localeCompare(String(b.s ?? "")));
-  const targets = activeGroups(data).filter((group) => {
+  const transferRounds = transferOpen ? live(data.r).filter((round) => !round.pl && activeGroups(data).some((group) => !group.p && group.r === round.id && isGroupOperationalToday(group))).sort((a, b) => String(a.s ?? "").localeCompare(String(b.s ?? ""))) : [];
+  const targets = transferOpen ? activeGroups(data).filter((group) => {
     if (group.id === student.g || isTeacherNameArchived(data, group.tc)) return false;
     if (!isGroupOperationalToday(group)) return false;
     if (!targetEnrollmentType || (group.p ? "private" : "group") !== targetEnrollmentType) return false;
@@ -1253,7 +1259,7 @@ function StudentRow({ student, index, toneIndex = index, canEditPayment, canEdit
     if (formerCard && (group.p ? "private" : "group") !== enrollmentType) return false;
     const count = data.m.filter((item) => item.g === group.id && !item.x && isEnrolledStudent(item) && item.id !== student.id).length;
     return group.p ? privateGroupCanAccept(data, group.id, student.id) : canAddStudentToGroup(group, count);
-  });
+  }) : [];
   const saveEdit = () => { commit((current) => { const target = current.m.find((item) => item.id === student.id); if (target) Object.assign(target, draft, { nw: draft.kind === "new" ? 1 : 0, sourceOther: draft.sourceOther.trim() }); if (groupSummary) { const linkedGroup = current.g.find((item) => item.id === groupSummary.id); if (linkedGroup) linkedGroup.lv = draft.n.trim(); } }, "تم حفظ بيانات الطالب."); setEditing(false); };
   const moveStudent = () => {
     if (!targetGroup || !targetEnrollmentType || (targetEnrollmentType === "group" && !targetRoundId)) return;
@@ -1383,7 +1389,7 @@ function StudentRow({ student, index, toneIndex = index, canEditPayment, canEdit
   const copyCode = () => void safeCopy(studentCodeFor(student)).then(() => setMoveFeedback({ text: "تم نسخ كود العميل.", error: false }));
   return <div id={"student-record-" + student.id} className={"student-card student-card--roster " + (toneIndex % 2 === 0 ? "student-card--light" : "student-card--gray")}>
     <div className="student-card__summary">
-      <div className="student-card__identity"><strong><span>{displayStudentName(student, data)}</span>{student.nt?.trim() && <small className="student-card__note" title={student.nt.trim()}> · {student.nt.trim()}</small>}</strong><div className="student-card__phone-line"><bdi className="phone phone-number" dir="ltr">{student.ph || "—"}</bdi>{student.ph && <button type="button" className="btn btn--ghost btn--small student-card__copy-phone" onClick={copyPhone} aria-label="نسخ رقم الهاتف" title="نسخ رقم الهاتف"><Copy size={13} /></button>}</div></div>
+      <div className="student-card__identity"><StudentNameWithNote name={displayStudentName(student, data)} note={student.nt} /><div className="student-card__phone-line"><bdi className="phone phone-number" dir="ltr">{student.ph || "—"}</bdi>{student.ph && <button type="button" className="btn btn--ghost btn--small student-card__copy-phone" onClick={copyPhone} aria-label="نسخ رقم الهاتف" title="نسخ رقم الهاتف"><Copy size={13} /></button>}</div></div>
       <span className="tag student-card__level">{visibleLevel(student.lv) || student.lv || "بدون Level"}</span>
       <button type="button" className="tag tag--muted student-system-id code-copy" title="نسخ كود العميل" onClick={copyCode}><bdi dir="ltr">{studentCodeFor(student)}</bdi><Copy size={12} /></button>
       <button type="button" className="btn btn--ghost btn--small student-card__copy-all" onClick={copyVisibleData}><Copy size={13} />نسخ البيانات</button>
@@ -1401,7 +1407,7 @@ function StudentRow({ student, index, toneIndex = index, canEditPayment, canEdit
       {displayedPrivateDetails && <div className="private-group-meta"><div><small>الأيام</small><strong>{displayedPrivateDetails.d || "—"}</strong></div><div><small>المدرس</small><strong>{teacherDisplayName(data, displayedPrivateDetails.tc)}</strong></div><div><small>الوقت</small><strong>{groupTime(displayedPrivateDetails) || "—"}</strong></div><div><small>الفترة</small><strong>{displayedPrivateDetails.s ? formatDate(displayedPrivateDetails.s, true) : "—"} – {displayedPrivateDetails.e ? formatDate(displayedPrivateDetails.e, true) : "—"}</strong></div></div>}
       {editing && canEditRenewal && <div className="grid-form student-edit"><div className="field"><label>الاسم</label><input value={draft.n} onChange={(event) => setDraft({ ...draft, n: event.target.value })} /></div><div className="field"><label>التليفون</label><input dir="ltr" value={draft.ph} onChange={(event) => setDraft({ ...draft, ph: event.target.value })} /></div><div className="field"><label>المستوى</label><select value={draft.lv} onChange={(event) => setDraft({ ...draft, lv: event.target.value })}>{draft.lv && !LEVELS.includes(draft.lv) && <option value={draft.lv}>{draft.lv} · مستوى قديم</option>}{LEVELS.map((item) => <option key={item} value={item}>{item}</option>)}</select></div><div className="field"><label>ملاحظة</label><input value={draft.nt} onChange={(event) => setDraft({ ...draft, nt: event.target.value })} /></div><div className="field"><label>تصنيف الطالب</label><select value={draft.kind} onChange={(event) => setDraft({ ...draft, kind: event.target.value as StudentKind })}><option value="new">جديد</option><option value="old">قديم</option><option value="returned">قديم رجع بعد انقطاع</option></select></div><div className="field"><label>المصدر</label><select value={draft.source} onChange={(event) => setDraft({ ...draft, source: event.target.value })}><option value="">اختر المصدر</option>{STUDENT_SOURCES.map((item) => <option key={item}>{item}</option>)}</select></div>{draft.source === "أخرى" && <div className="field"><label>وصف المصدر</label><input value={draft.sourceOther} onChange={(event) => setDraft({ ...draft, sourceOther: event.target.value })} /></div>}<button type="button" className="btn" onClick={saveEdit}>حفظ بيانات الطالب</button></div>}
       {canEditRenewal && <div className="student-tools">{formerCard && <div className="field student-enrollment-type"><label htmlFor={"student-kind-" + student.id}>نوع الاشتراك المطلوب</label><select id={"student-kind-" + student.id} value={enrollmentType} onChange={(event) => { const value = event.target.value as "group" | "private"; setEnrollmentType(value); setTargetGroup(""); commit((current) => { const target = current.m.find((item) => item.id === student.id); if (target) target.enrollmentType = value; }, "تم تحديث نوع الاشتراك المطلوب."); }}><option value="group">جروب</option><option value="private">Private</option></select></div>}{student.ren === 2 && <div className="field student-renewal-reason"><label>سبب عدم التجديد</label><textarea rows={2} value={reason} onChange={(event) => setReason(event.target.value)} onBlur={() => commit((current) => { const target = current.m.find((item) => item.id === student.id); if (target) target.renewalReason = reason.trim(); }, "تم حفظ سبب عدم التجديد.")} placeholder="اكتب سبب القرار…" /></div>}<FollowupControls record={student} data={data} onSave={(date, note) => commit((current) => { const target = current.m.find((item) => item.id === student.id); if (target) saveFollowup(target, date, note); }, "تم حفظ متابعة الطالب.")} />
-        <details className="student-transfer-panel"><summary>نقل أو نسخ الطالب</summary><div className="toolbar student-transfer">
+        <details className="student-transfer-panel" onToggle={(event) => setTransferOpen(event.currentTarget.open)}><summary>نقل أو نسخ الطالب</summary><div className="toolbar student-transfer">
           <div className="student-transfer__action"><label htmlFor={"student-destination-" + student.id}>نقل إلى</label><div className="student-transfer__controls"><select id={"student-destination-" + student.id} value={targetEnrollmentType} onChange={(event) => { setTargetEnrollmentType(event.target.value as typeof targetEnrollmentType); setTargetRoundId(""); setTargetGroup(""); setMoveFeedback(null); }}><option value="">اختر جروب أو Private</option><option value="group">جروب</option><option value="private">Private</option></select>{targetEnrollmentType === "group" && <select aria-label="اختر الراوند" value={targetRoundId} onChange={(event) => { setTargetRoundId(event.target.value); setTargetGroup(""); }}><option value="">اختر الراوند</option>{transferRounds.map((round) => <option key={round.id} value={round.id}>{roundName(round)}</option>)}</select>}<select id={"student-group-" + student.id} value={targetGroup} disabled={!targetEnrollmentType || targetEnrollmentType === "group" && !targetRoundId} onChange={(event) => { setTargetGroup(event.target.value); setMoveFeedback(null); }}><option value="">{targetEnrollmentType === "group" && !targetRoundId ? "اختر الراوند أولًا" : "اختر المجموعة"}</option>{targets.map((group) => <option key={group.id} value={group.id}>{group.p ? "Private · " : ""}{displayGroupLabel(group, data)}</option>)}</select><button type="button" className="btn btn--ghost btn--small" disabled={!targetGroup || !targetEnrollmentType || targetEnrollmentType === "group" && !targetRoundId} onClick={moveStudent}>نقل الطالب</button></div></div>
           <StudentCopyControls student={student} data={data} commit={commit} onFeedback={setMoveFeedback} />
           <div className="student-transfer__action"><label htmlFor={"student-tab-" + student.id}>نقل إلى تبويب</label><div className="student-transfer__controls"><select id={"student-tab-" + student.id} aria-label="نقل الطالب إلى تبويب" value={targetStudentTab} onChange={(event) => { setTargetStudentTab(event.target.value as typeof targetStudentTab); setMoveFeedback(null); }}><option value="">اختر التبويب</option><option value="next">عملاء الراوند الجاي</option><option value="leads">الليدز</option></select><div className="student-transfer__tab-actions"><button type="button" className="btn btn--ghost btn--small" disabled={!targetStudentTab} onClick={moveStudentToTab}>نقل</button><button type="button" className="btn btn--small" disabled={!targetStudentTab || targetStudentTab !== "next"} onClick={copyStudentToTab}><Copy size={13} />نسخ</button></div></div></div>
@@ -1411,14 +1417,14 @@ function StudentRow({ student, index, toneIndex = index, canEditPayment, canEdit
     </div></details>}
     {moveFeedback && <div className={"student-card__feedback " + (moveFeedback.error ? "student-card__feedback--error" : "")} role="status">{moveFeedback.text}</div>}
   </div>;
-}
+});
 function StudentCopyControls({ student, data, commit, onFeedback }: { student: Student; data: AcademyData; commit: Commit; onFeedback: (feedback: { text: string; error: boolean } | null) => void }) {
   const [open, setOpen] = useState(false);
   const [roundId, setRoundId] = useState("");
   const [groupId, setGroupId] = useState("");
-  const rounds = live(data.r).filter((round) => isRoundActive(data, round.id)).sort((a, b) => roundName(a).localeCompare(roundName(b), "ar"));
+  const rounds = open ? live(data.r).filter((round) => isRoundActive(data, round.id)).sort((a, b) => roundName(a).localeCompare(roundName(b), "ar")) : [];
   const matchesStudent = (candidate: Student, targetId: string) => !candidate.x && isEnrolledStudent(candidate) && candidate.g === targetId && normalise(candidate.n) === normalise(student.n) && normalise(candidate.ph) === normalise(student.ph);
-  const groups = roundId ? nonArchivedGroups(data).filter((group) => {
+  const groups = open && roundId ? nonArchivedGroups(data).filter((group) => {
     if (group.r !== roundId || group.p || group.id === student.g || isTeacherNameArchived(data, group.tc) || data.m.some((candidate) => matchesStudent(candidate, group.id))) return false;
     if (!isGroupOperationalToday(group)) return false;
     const count = data.m.filter((candidate) => candidate.g === group.id && !candidate.x && isEnrolledStudent(candidate)).length;
@@ -1471,11 +1477,27 @@ function ArchivedPrivateRecords({ data, commit }: { data: AcademyData; commit: C
     commit((draft) => { const target = draft.m.find((item) => item.id === student.id); if (target) { delete target.x; delete target.xa; } }, "تمت استعادة طالب Private.");
   };
   return <section className="section archived-private-records"><button type="button" className="section-head archived-private-records__toggle" aria-expanded={open} onClick={() => setOpen((value) => !value)}><span><h2>سجلات Private المؤرشفة</h2><p>اعرض السجلات المخفية واستعدها لتعديلها.</p></span><span className="tag tag--muted">{archivedGroups.length + archivedStudents.length}</span><ChevronDown size={17} /></button>{open && <div className="card-list">
-    {archivedGroups.map((group) => { const students = data.m.filter((item) => item.g === group.id); return <article className="entity-card archived-private-record" key={`g:${group.id}`}><div><h3>{students[0]?.n || group.lv || "Private بدون اسم"}{students.length > 1 ? ` · ${students.length} سجلات` : ""}</h3>{students.map((student) => <p key={student.id}>{student.studentCode || "بدون كود"} · <bdi dir="ltr" className="phone-number">{student.ph || "بدون هاتف"}</bdi> · {student.lv || "بدون مستوى"}{student.x ? " · طالب مؤرشف" : " · محفوظ"}</p>)}<small>مجموعة Private مؤرشفة · {group.tc || "بدون مدرس"}</small></div><button type="button" className="btn btn--small" onClick={() => restoreGroup(group)}><ArchiveRestore size={14} />استعادة المجموعة للتعديل</button></article>; })}
-    {archivedStudents.filter((student) => !archivedGroups.some((group) => group.id === student.g)).map((student) => { const group = data.g.find((item) => item.id === student.g); return <article className="entity-card archived-private-record" key={`m:${student.id}`}><div><h3>{student.n || "طالب بدون اسم"}</h3><p>{student.studentCode || "بدون كود"} · <bdi dir="ltr" className="phone-number">{student.ph || "بدون هاتف"}</bdi> · {student.lv || "بدون مستوى"}</p><small>طالب Private مؤرشف · {group?.lv || "مجموعة غير موجودة"}</small></div><button type="button" className="btn btn--small" onClick={() => restoreStudent(student)}><ArchiveRestore size={14} />استعادة للتعديل</button></article>; })}
+    {archivedGroups.map((group) => {
+      const students = data.m.filter((item) => item.g === group.id);
+      return (
+        <article className="entity-card archived-private-record" key={`g:${group.id}`}>
+          <div>
+            <h3><StudentNameWithNote name={students[0]?.n || group.lv || "Private بدون اسم"} note={students[0]?.nt} />{students.length > 1 ? ` · ${students.length} سجلات` : ""}</h3>
+            {students.map((student) => (
+              <p key={student.id}>
+                {students.length > 1 && <><StudentNameWithNote name={student.n || "طالب بدون اسم"} note={student.nt} /> · </>}
+                {student.studentCode || "بدون كود"} · <bdi dir="ltr" className="phone-number">{student.ph || "بدون هاتف"}</bdi> · {student.lv || "بدون مستوى"}{student.x ? " · طالب مؤرشف" : " · محفوظ"}
+              </p>
+            ))}
+            <small>مجموعة Private مؤرشفة · {group.tc || "بدون مدرس"}</small>
+          </div>
+          <button type="button" className="btn btn--small" onClick={() => restoreGroup(group)}><ArchiveRestore size={14} />استعادة المجموعة للتعديل</button>
+        </article>
+      );
+    })}
+    {archivedStudents.filter((student) => !archivedGroups.some((group) => group.id === student.g)).map((student) => { const group = data.g.find((item) => item.id === student.g); return <article className="entity-card archived-private-record" key={`m:${student.id}`}><div><h3><StudentNameWithNote name={student.n || "طالب بدون اسم"} note={student.nt} /></h3><p>{student.studentCode || "بدون كود"} · <bdi dir="ltr" className="phone-number">{student.ph || "بدون هاتف"}</bdi> · {student.lv || "بدون مستوى"}</p><small>طالب Private مؤرشف · {group?.lv || "مجموعة غير موجودة"}</small></div><button type="button" className="btn btn--small" onClick={() => restoreStudent(student)}><ArchiveRestore size={14} />استعادة للتعديل</button></article>; })}
   </div>}</section>;
 }
-
 function PrivateStudentEntry({ group, data, profile, teacherAccounts, toneOffset = 0, commit }: { group: AcademyGroup; data: AcademyData; profile: Profile; teacherAccounts: TeacherAccount[]; toneOffset?: number; commit: Commit }) {
   const roster = activeStudentsOf(data, group.id);
   const movedRecords = live(data.m).filter((student) => student.g === group.id && !isEnrolledStudent(student));
@@ -1880,7 +1902,7 @@ function LeadCard({ lead, data, commit, toneIndex }: { lead: Lead; data: Academy
   const phone = lead.ph || linkedSource?.ph || "";
   return <div id={`lead-record-${lead.id}`} className={`entity-card prospect-card ${toneIndex % 2 ? "prospect-card--gray" : "prospect-card--light"}`}>
     <div className="student-card__summary crm-card-summary">
-      <div className="student-card__identity"><strong>{displayName}</strong><div className="student-card__phone-line"><bdi className="phone-number" dir="ltr">{phone || "بدون رقم"}</bdi>{phone && <button type="button" className="btn btn--ghost btn--small student-card__copy-phone" onClick={() => void copy(phone, "رقم الهاتف")} aria-label="نسخ رقم الهاتف" title="نسخ رقم الهاتف"><Copy size={13} /></button>}</div></div>
+      <div className="student-card__identity"><StudentNameWithNote name={displayName} note={lead.nt} /><div className="student-card__phone-line"><bdi className="phone-number" dir="ltr">{phone || "بدون رقم"}</bdi>{phone && <button type="button" className="btn btn--ghost btn--small student-card__copy-phone" onClick={() => void copy(phone, "رقم الهاتف")} aria-label="نسخ رقم الهاتف" title="نسخ رقم الهاتف"><Copy size={13} /></button>}</div></div>
       <span className="tag student-card__level">{visibleLevel(lead.lv) || lead.lv || "بدون Level"}</span>
       <button type="button" className="tag tag--muted student-system-id code-copy" title="نسخ كود العميل" onClick={() => void copy(code, "كود العميل")}><bdi dir="ltr">{code}</bdi><Copy size={12} /></button>
       <button type="button" className="btn btn--ghost btn--small student-card__copy-all" onClick={() => void copy([displayName, phone, lead.lv || "", code].join("\t"), "بيانات العميل")}><Copy size={13} />نسخ البيانات</button>
@@ -1943,7 +1965,7 @@ function FormerCustomerCard({ student, data, commit, canEdit }: { student: Stude
   };
   return <article id={"student-record-" + student.id} className="former-customer-card">
     <div className="student-card__summary former-card-summary">
-      <div className="student-card__identity"><strong>{displayStudentName(student, data)}</strong><div className="student-card__phone-line">{student.ph ? <button type="button" className="phone phone-number former-customer-phone" dir="ltr" onClick={() => void copy(student.ph ?? "", "رقم الهاتف")}>{student.ph}<Copy size={12} /></button> : <span className="phone">بدون رقم</span>}</div></div>
+      <div className="student-card__identity"><StudentNameWithNote name={displayStudentName(student, data)} note={student.nt} /><div className="student-card__phone-line">{student.ph ? <button type="button" className="phone phone-number former-customer-phone" dir="ltr" onClick={() => void copy(student.ph ?? "", "رقم الهاتف")}>{student.ph}<Copy size={12} /></button> : <span className="phone">بدون رقم</span>}</div></div>
       <span className="tag student-card__level">{student.lv || "بدون Level"}</span>
       <button type="button" className="tag tag--muted student-system-id code-copy" title="نسخ كود العميل" onClick={() => void copy(studentCodeFor(student), "كود العميل")}><bdi dir="ltr">{studentCodeFor(student)}</bdi><Copy size={12} /></button>
       <button type="button" className="btn btn--ghost btn--small student-card__copy-all" onClick={() => void copy([displayStudentName(student, data), student.ph || "", student.lv || "", studentCodeFor(student)].join("\t"), "بيانات الطالب")}><Copy size={13} />نسخ البيانات</button>

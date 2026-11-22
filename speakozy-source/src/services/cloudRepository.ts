@@ -108,8 +108,10 @@ export class CloudRepository {
   private teacherProjectionSignatures = new Map<string, string>();
   private baseData: AcademyData | null = null;
   private lastMain = 0;
+  private lastFinance = 0;
   private lastTeacher = 0;
   private lastBackupAttemptDay = "";
+  private teacherProjectionSyncPending = true;
   private teacherDirectory: TeacherAccount[] = [];
 
   constructor(user: User) { this.user = user; }
@@ -140,10 +142,12 @@ export class CloudRepository {
     // role field, so retain the legacy finance-read probe as a compatibility fallback.
     let role: Role = userDocument.role === "owner" ? "owner" : userDocument.role === "admin" ? "admin" : "admin";
     let finance: AcademyData["finance"] = [];
+    this.lastFinance = 0;
     if (userDocument.role !== "admin") {
       try {
         const financeSnapshot = await getDoc(doc(firestore, "hub", "finance"));
         const financeDocument = financeSnapshot.data() as HubDocument | undefined;
+        this.lastFinance = Number(financeDocument?.updatedAt ?? 0);
         if (financeDocument?.d) finance = parseFinance(financeDocument.d);
         // Preserve the finance-read probe only for legacy accounts without an explicit role.
         if (userDocument.role !== "owner") role = "owner";
@@ -158,8 +162,7 @@ export class CloudRepository {
     await this.reconcileAllAttendance(data);
     this.baseData = clone(data);
     if (!import.meta.env.DEV) {
-      await this.ensureDailyBackups(data);
-      await this.publishTeachers(data);
+      void this.ensureDailyBackups(data);
     }
     return { profile: this.profile, data };
   }
@@ -228,22 +231,37 @@ export class CloudRepository {
       await this.reconcileTeacherAttendance(next);
       return before !== JSON.stringify(next.attendance) || next !== current ? toData(next) : null;
     }
-    const mainSnapshot = await getDoc(doc(firestore, "hub", "main"));
+    const financeRead = canAccessFinance(this.profile.role) ? getDoc(doc(firestore, "hub", "finance")) : Promise.resolve(null);
+    const [mainSnapshot, financeSnapshot] = await Promise.all([getDoc(doc(firestore, "hub", "main")), financeRead]);
     const mainDocument = (mainSnapshot.data() ?? {}) as HubDocument;
     if (!mainDocument.d) return null;
+    const mainUpdatedAt = Number(mainDocument.updatedAt ?? 0);
+    const financeDocument = financeSnapshot?.data() as HubDocument | undefined;
+    const financeUpdatedAt = Number(financeDocument?.updatedAt ?? 0);
+    const mainChanged = mainUpdatedAt !== this.lastMain;
+    const financeChanged = Boolean(financeSnapshot) && financeUpdatedAt !== this.lastFinance;
+    if (!mainChanged && !financeChanged) {
+      if (!import.meta.env.DEV) {
+        void this.ensureDailyBackups(current);
+        if (this.teacherProjectionSyncPending) void this.publishTeachers(current);
+      }
+      const attendanceOnly = toData(current);
+      const beforeAttendance = JSON.stringify(attendanceOnly.attendance);
+      await this.reconcileAllAttendance(attendanceOnly);
+      return beforeAttendance !== JSON.stringify(attendanceOnly.attendance) ? attendanceOnly : null;
+    }
     const remote = parseData(mainDocument.d);
-    if (canAccessFinance(this.profile.role)) {
-      const financeSnapshot = await getDoc(doc(firestore, "hub", "finance"));
-      const financeDocument = financeSnapshot.data() as HubDocument | undefined;
+    if (financeSnapshot) {
       if (financeDocument?.d) remote.finance = parseFinance(financeDocument.d);
     } else remote.finance = [];
     await this.reconcileAllAttendance(remote);
     const next = mergeRemote(current, remote, this.baseData ?? remote);
     if (!canAccessFinance(this.profile.role)) next.finance = [];
     this.baseData = clone(remote);
-    this.lastMain = Number(mainDocument.updatedAt ?? this.lastMain);
+    this.lastMain = mainUpdatedAt;
+    if (financeSnapshot) this.lastFinance = financeUpdatedAt;
     if (!import.meta.env.DEV) void this.ensureDailyBackups(next);
-    if (!import.meta.env.DEV) await this.publishTeachers(next);
+    if (!import.meta.env.DEV && mainChanged) void this.publishTeachers(next);
     return JSON.stringify(next) !== JSON.stringify(current) ? next : null;
   }
 
@@ -307,6 +325,7 @@ export class CloudRepository {
     this.lastMain = updatedAt;
     if (canAccessFinance(this.profile.role)) {
       await setDoc(doc(firestore, "hub", "finance"), { d: JSON.stringify(finance), updatedAt });
+      this.lastFinance = updatedAt;
     }
     await this.syncCentralAttendance(data);
     await this.publishTeachers(data);
@@ -430,6 +449,10 @@ export class CloudRepository {
         await setDoc(doc(firestore, "teachers", userSnapshot.id), { d: payloadJson, gids, updatedAt: Date.now() });
         this.teacherProjectionSignatures.set(userSnapshot.id, signature);
       }));
-    } catch (error) { console.warn("Teacher projection publish skipped", error); }
+      this.teacherProjectionSyncPending = false;
+    } catch (error) {
+      this.teacherProjectionSyncPending = true;
+      console.warn("Teacher projection publish skipped", error);
+    }
   }
 }
