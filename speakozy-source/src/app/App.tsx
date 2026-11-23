@@ -484,7 +484,7 @@ function AppShell() {
       {tab === "teachers" && <TeachersView data={data} profile={profile} commit={academy.commit} teacherAccounts={academy.teacherAccounts} onDeleteTeacher={academy.deleteTeacherFromSystem} onOpenGroup={openTeacherGroup} />}
       {tab === "finance" && profile.role === "owner" && <FinanceView data={data} commit={academy.commit} onOpenGroup={openTeacherGroup} />}
       {tab === "retention" && profile.role !== "teacher" && <RetentionView data={data} />}
-      {tab === "security" && profile.role !== "teacher" && <SecurityView data={data} profile={profile} commit={academy.commit} backups={academy.backups} backupsLoading={academy.backupsLoading} refreshBackups={academy.refreshBackups} focusArchiveKey={archiveFocusKey} />}
+      {tab === "security" && profile.role !== "teacher" && <SecurityView data={data} profile={profile} commit={academy.commit} backups={academy.backups} backupsLoading={academy.backupsLoading} loadBackups={academy.loadBackups} refreshBackups={academy.refreshBackups} focusArchiveKey={archiveFocusKey} />}
       {tab === "scripts" && (profile.role === "owner" || profile.role === "admin") && <ScriptsView data={data} commit={academy.commit} />}
       {tab === "marketing" && canAccessMarketingAnalytics(profile.role) && <MarketingView data={data} profile={profile} commit={academy.commit} refreshProjection={academy.refreshMarketingProjection} />}
     </main>
@@ -2532,11 +2532,12 @@ function mergeBackup(draft: AcademyData, value: Partial<AcademyData>) {
   if (!draft.cur && value.cur) draft.cur = value.cur;
 }
 
-function SecurityView({ data, profile, commit, backups, backupsLoading, refreshBackups, focusArchiveKey }: { data: AcademyData; profile: Profile; commit: Commit; backups: CloudBackup[]; backupsLoading: boolean; refreshBackups: () => Promise<CloudBackup[]>; focusArchiveKey?: string }) {
+function SecurityView({ data, profile, commit, backups, backupsLoading, loadBackups, refreshBackups, focusArchiveKey }: { data: AcademyData; profile: Profile; commit: Commit; backups: CloudBackup[]; backupsLoading: boolean; loadBackups: () => Promise<CloudBackup[]>; refreshBackups: () => Promise<CloudBackup[]>; focusArchiveKey?: string }) {
   const [importing, setImporting] = useState(false);
   const [archiveQuery, setArchiveQuery] = useState("");
   const [focusedArchiveKey, setFocusedArchiveKey] = useState(focusArchiveKey ?? "");
   useEffect(() => { setFocusedArchiveKey(focusArchiveKey ?? ""); if (focusArchiveKey) setArchiveQuery(""); }, [focusArchiveKey]);
+  useEffect(() => { void loadBackups(); }, [loadBackups]);
   const latestBackup = Math.max(Number(data.lb ?? 0), backups[0]?.createdAt ?? 0);
   const backupIsOld = !latestBackup || Date.now() - latestBackup > 8 * 86400000;
   const archived: ArchiveItem[] = [

@@ -18,6 +18,7 @@ const modules = [
   ["src/domain/data-quality.ts", "domain/data-quality.js"],
   ["src/domain/permissions.ts", "domain/permissions.js"],
   ["src/domain/followup.ts", "domain/followup.js"],
+  ["src/domain/attendance-deltas.ts", "domain/attendance-deltas.js"],
   ["src/services/attendance-sync.ts", "services/attendance-sync.js"]
 ];
 
@@ -43,6 +44,7 @@ try {
   const { addAutomaticFormerCustomerCopies } = require(join(tempRoot, "domain/automatic-former-copies.js"));
   const { previewData } = require(join(tempRoot, "domain/demo.js"));
   const { canAccessFinance, canAccessMarketingAnalytics, isMarketingRole } = require(join(tempRoot, "domain/permissions.js"));
+  const { applyAttendanceDeltas, mergeAttendanceRecords } = require(join(tempRoot, "domain/attendance-deltas.js"));
   const { allTeacherScheduleConflicts, cancelSession, durationHours, ensureEightActiveSessions, feedbackSessionsDue, generateSessions, monthTeacherHours, plannedGroupEndDate, rescheduleGroupPreservingAttendance, rescheduleSession, restoreSession, scheduledSessionsOnDate, teacherScheduleConflicts, teacherSessionsForMonth, weeklyScheduledHours } = require(join(tempRoot, "domain/schedule.js"));
   const { dataQualityIssues } = require(join(tempRoot, "domain/data-quality.js"));
   const { AUTOMATIC_LEAD_FOLLOWUP_INTERVAL_MS, AUTOMATIC_STUDENT_FOLLOWUP_INTERVAL_MS, isAutomaticFollowupDue } = require(join(tempRoot, "domain/followup.js"));
@@ -58,6 +60,15 @@ try {
   assert.equal(monthTeacherHours([legacyTimedGroup], "2026-11").hours, 1.5, "monthly teacher hours use the duration displayed from a legacy combined time range");
   assert.equal(durationHours({ id: "legacy-24h-time", r: "legacy-round", t: "22:30 - 00:00" }), 1.5, "legacy 24-hour ranges crossing midnight count correctly");
   const { attendanceDocumentId, removedAttendanceKeys } = require(join(tempRoot, "services/attendance-sync.js"));
+
+  const attendanceBase = { id: "attendance-doc", date: "2026-11-20", gid: "group-a", mid: "student-a", status: "present", updatedAt: 10 };
+  const attendanceRemoteEdit = { ...attendanceBase, status: "absent", updatedAt: 11 };
+  assert.deepEqual(mergeAttendanceRecords([attendanceBase], [], [attendanceBase]), [], "a central listener deletion removes an unchanged baseline attendance record");
+  assert.deepEqual(mergeAttendanceRecords([], [attendanceBase], [attendanceBase]), [], "an unchanged stale hub copy does not resurrect a centrally deleted attendance record");
+  assert.deepEqual(mergeAttendanceRecords([attendanceRemoteEdit], [attendanceBase], [attendanceBase]), [attendanceRemoteEdit], "a local attendance edit wins over an unchanged hub baseline");
+  assert.deepEqual(mergeAttendanceRecords([attendanceBase], [attendanceRemoteEdit], [attendanceBase]), [attendanceRemoteEdit], "a changed remote attendance record updates an unchanged baseline");
+  assert.deepEqual(applyAttendanceDeltas([attendanceRemoteEdit], [{ type: "remove", record: attendanceBase }]), [attendanceRemoteEdit], "a stale listener deletion cannot erase a newer local record");
+  assert.deepEqual(applyAttendanceDeltas([attendanceBase], [{ type: "upsert", record: attendanceRemoteEdit }], ["2026-11-20|group-a|student-a"]), [attendanceBase], "dirty attendance keys are protected from listener updates");
 
   const moveDays = (iso, amount) => {
     const date = new Date(`${iso}T00:00:00`);
@@ -536,7 +547,7 @@ try {
   const noEnd = { ...satTueGroup, e: undefined };
   const generated = generateSessions(noEnd);
   assert.ok(generated.length <= 8);
-  console.log("All domain tests passed: schedules, two-week student reminders, weekly lead reminders, no-renewal cohort continuity, former-customer copies, archive boundaries, capacity, finance roles, and attendance sync.");
+  console.log("All domain tests passed: schedules, two-week student reminders, weekly lead reminders, no-renewal cohort continuity, former-customer copies, archive boundaries, capacity, finance roles, and attendance snapshot merge/conflict handling.");
 } finally {
   rmSync(tempRoot, { recursive: true, force: true });
 }
