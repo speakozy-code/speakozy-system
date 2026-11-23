@@ -3,7 +3,8 @@ import { addDoc, collection, deleteDoc, doc, getDoc, getDocs, limit, onSnapshot,
 import { EMPTY_DATA, type AcademyData, type AttendanceRecord, type Profile, type Role, type TeacherAccount } from "../domain/types";
 import { canAccessFinance, isMarketingRole } from "../domain/permissions";
 import { activeGroups, attendanceKey, isEnrolledStudent, normalise, toIsoDate } from "../domain/utils";
-import { attendanceDocumentId, removedAttendanceKeys } from "./attendance-sync";
+import { mergeAttendanceRecords, sameAttendanceRecord, type AttendanceDelta } from "../domain/attendance-deltas";
+import { attendanceDocumentId } from "./attendance-sync";
 import { firestore } from "./firebase";
 
 interface HubDocument { d?: string; updatedAt?: number; by?: string; n?: number }
@@ -40,6 +41,16 @@ function parseFinance(value?: string): AcademyData["finance"] {
     if (Array.isArray(parsed)) return parsed;
     return Array.isArray(parsed.finance) ? parsed.finance : [];
   } catch { return []; }
+}
+
+function attendanceRecord(id: string, value: unknown): AttendanceRecord | null {
+  const row = value as AttendanceDocument;
+  if (!row.date || !row.gid || !row.mid) return null;
+  return {
+    id, date: row.date, gid: row.gid, mid: row.mid,
+    status: (row.status ?? "") as AttendanceRecord["status"],
+    teacher: row.teacher ?? "", teacherUid: row.teacherUid ?? "", updatedAt: Number(row.updatedAt ?? 0)
+  };
 }
 
 function marketingProjection(data: AcademyData): AcademyData {
@@ -85,13 +96,7 @@ export function mergeRemote(local: AcademyData, remote: AcademyData, base?: Acad
   next.m = mergeCollection(next.m, remote.m, base?.m);
   next.l = mergeCollection(next.l, remote.l, base?.l);
   next.scripts = mergeCollection(next.scripts ?? [], remote.scripts ?? [], base?.scripts ?? []);
-  const currentAttendance = new Map(next.attendance.map((item) => [attendanceKey(item), item]));
-  remote.attendance.forEach((item) => {
-    const key = attendanceKey(item);
-    const old = currentAttendance.get(key);
-    if (!old || Number(item.updatedAt ?? 0) > Number(old.updatedAt ?? 0)) currentAttendance.set(key, item);
-  });
-  next.attendance = [...currentAttendance.values()];
+  next.attendance = mergeAttendanceRecords(next.attendance, remote.attendance, base?.attendance);
   if (base && next.cur === base.cur && remote.cur !== base.cur) next.cur = remote.cur;
   else if (!next.cur && remote.cur) next.cur = remote.cur;
   if (base && next.lb === base.lb && remote.lb !== base.lb) next.lb = remote.lb;
@@ -104,15 +109,65 @@ export function mergeRemote(local: AcademyData, remote: AcademyData, base?: Acad
 export class CloudRepository {
   readonly user: User;
   profile!: Profile;
-  private attendanceMirror = new Map<string, string>();
+  private attendanceMirror = new Map<string, AttendanceRecord>();
+  private attendanceKeyByDocumentId = new Map<string, string>();
+  private pendingAttendance = new Map<string, { revision: number; record: AttendanceRecord | null }>();
+  private attendanceRevision = 0;
+  private attendanceSyncReady = false;
+  private attendanceReadyPromise: Promise<void> | null = null;
+  private resolveAttendanceReady: (() => void) | null = null;
+  private rejectAttendanceReady: ((error: unknown) => void) | null = null;
+  private attendanceUnsubscribe: (() => void) | null = null;
+  private attendanceObserver: ((changes: AttendanceDelta[]) => void) | null = null;
+  private pendingAttendanceBatches: AttendanceDelta[][] = [];
   private teacherProjectionSignatures = new Map<string, string>();
   private baseData: AcademyData | null = null;
   private lastMain = 0;
+  private lastFinance = 0;
   private lastTeacher = 0;
   private lastBackupAttemptDay = "";
+  private teacherProjectionSyncPending = true;
   private teacherDirectory: TeacherAccount[] = [];
 
   constructor(user: User) { this.user = user; }
+
+  dispose(): void {
+    this.attendanceUnsubscribe?.();
+    this.attendanceUnsubscribe = null;
+    this.attendanceObserver = null;
+    this.attendanceMirror.clear();
+    this.attendanceKeyByDocumentId.clear();
+    this.pendingAttendanceBatches = [];
+    this.rejectAttendanceReady?.(new Error("Attendance listener disposed"));
+    this.rejectAttendanceReady = null;
+    this.resolveAttendanceReady = null;
+    this.attendanceReadyPromise = null;
+  }
+
+  recordAttendanceIntent(before: AttendanceRecord[], after: AttendanceRecord[]): void {
+    const prior = new Map(before.map((record) => [attendanceKey(record), record]));
+    const next = new Map(after.map((record) => [attendanceKey(record), record]));
+    const keys = new Set([...prior.keys(), ...next.keys()]);
+    keys.forEach((key) => {
+      const oldRecord = prior.get(key);
+      const newRecord = next.get(key);
+      if (sameAttendanceRecord(oldRecord, newRecord)) return;
+      this.pendingAttendance.set(key, { revision: ++this.attendanceRevision, record: newRecord ?? null });
+    });
+  }
+
+  watchAttendance(onChange: (changes: AttendanceDelta[]) => void): () => void {
+    this.attendanceObserver = onChange;
+    this.pendingAttendanceBatches.splice(0).forEach((batch) => this.deliverAttendanceChanges(batch));
+    return () => { if (this.attendanceObserver === onChange) this.attendanceObserver = null; };
+  }
+
+  private deliverAttendanceChanges(changes: AttendanceDelta[]): void {
+    const filtered = changes.filter(({ record }) => !this.pendingAttendance.has(attendanceKey(record)));
+    if (!filtered.length) return;
+    if (this.attendanceObserver) this.attendanceObserver(filtered);
+    else this.pendingAttendanceBatches.push(filtered);
+  }
 
   async load(): Promise<{ profile: Profile; data: AcademyData }> {
     const userSnapshot = await getDoc(doc(firestore, "users", this.user.uid));
@@ -140,10 +195,12 @@ export class CloudRepository {
     // role field, so retain the legacy finance-read probe as a compatibility fallback.
     let role: Role = userDocument.role === "owner" ? "owner" : userDocument.role === "admin" ? "admin" : "admin";
     let finance: AcademyData["finance"] = [];
+    this.lastFinance = 0;
     if (userDocument.role !== "admin") {
       try {
         const financeSnapshot = await getDoc(doc(firestore, "hub", "finance"));
         const financeDocument = financeSnapshot.data() as HubDocument | undefined;
+        this.lastFinance = Number(financeDocument?.updatedAt ?? 0);
         if (financeDocument?.d) finance = parseFinance(financeDocument.d);
         // Preserve the finance-read probe only for legacy accounts without an explicit role.
         if (userDocument.role !== "owner") role = "owner";
@@ -155,11 +212,10 @@ export class CloudRepository {
     this.profile = { uid: this.user.uid, email: this.user.email ?? "", role, teacherName: "" };
     const data = parseData(mainDocument.d);
     data.finance = finance;
-    await this.reconcileAllAttendance(data);
     this.baseData = clone(data);
+    await this.reconcileAllAttendance(data);
     if (!import.meta.env.DEV) {
-      await this.ensureDailyBackups(data);
-      await this.publishTeachers(data);
+      void this.ensureDailyBackups(data);
     }
     return { profile: this.profile, data };
   }
@@ -224,26 +280,35 @@ export class CloudRepository {
         remote.attendance = current.attendance;
         next = { ...current, r: remote.r, g: remote.g, m: remote.m, cur: remote.cur, teacherHours: remote.teacherHours };
       }
-      const before = JSON.stringify(next.attendance);
-      await this.reconcileTeacherAttendance(next);
-      return before !== JSON.stringify(next.attendance) || next !== current ? toData(next) : null;
+      return next !== current ? toData(next) : null;
     }
-    const mainSnapshot = await getDoc(doc(firestore, "hub", "main"));
+    const financeRead = canAccessFinance(this.profile.role) ? getDoc(doc(firestore, "hub", "finance")) : Promise.resolve(null);
+    const [mainSnapshot, financeSnapshot] = await Promise.all([getDoc(doc(firestore, "hub", "main")), financeRead]);
     const mainDocument = (mainSnapshot.data() ?? {}) as HubDocument;
     if (!mainDocument.d) return null;
+    const mainUpdatedAt = Number(mainDocument.updatedAt ?? 0);
+    const financeDocument = financeSnapshot?.data() as HubDocument | undefined;
+    const financeUpdatedAt = Number(financeDocument?.updatedAt ?? 0);
+    const mainChanged = mainUpdatedAt !== this.lastMain;
+    const financeChanged = Boolean(financeSnapshot) && financeUpdatedAt !== this.lastFinance;
+    if (!mainChanged && !financeChanged) {
+      if (!import.meta.env.DEV) {
+        void this.ensureDailyBackups(current);
+        if (this.teacherProjectionSyncPending) void this.publishTeachers(current);
+      }
+      return null;
+    }
     const remote = parseData(mainDocument.d);
-    if (canAccessFinance(this.profile.role)) {
-      const financeSnapshot = await getDoc(doc(firestore, "hub", "finance"));
-      const financeDocument = financeSnapshot.data() as HubDocument | undefined;
+    if (financeSnapshot) {
       if (financeDocument?.d) remote.finance = parseFinance(financeDocument.d);
     } else remote.finance = [];
-    await this.reconcileAllAttendance(remote);
     const next = mergeRemote(current, remote, this.baseData ?? remote);
     if (!canAccessFinance(this.profile.role)) next.finance = [];
     this.baseData = clone(remote);
-    this.lastMain = Number(mainDocument.updatedAt ?? this.lastMain);
+    this.lastMain = mainUpdatedAt;
+    if (financeSnapshot) this.lastFinance = financeUpdatedAt;
     if (!import.meta.env.DEV) void this.ensureDailyBackups(next);
-    if (!import.meta.env.DEV) await this.publishTeachers(next);
+    if (!import.meta.env.DEV && mainChanged) void this.publishTeachers(next);
     return JSON.stringify(next) !== JSON.stringify(current) ? next : null;
   }
 
@@ -292,10 +357,13 @@ export class CloudRepository {
     if (import.meta.env.DEV) return "preview";
     if (isMarketingRole(this.profile.role)) throw new Error("حساب المسوّق للعرض فقط.");
     if (this.profile.role === "teacher") {
-      await this.syncTeacherAttendance(data);
+      const teacherData = clone(data);
+      this.applyPendingAttendance(teacherData);
+      await this.syncTeacherAttendance(teacherData);
       return "saved";
     }
     const clean = clone(data);
+    this.applyPendingAttendance(clean);
     if (!canAccessFinance(this.profile.role)) clean.finance = [];
     const finance = clean.finance;
     delete (clean as Partial<AcademyData>).finance;
@@ -307,12 +375,13 @@ export class CloudRepository {
     this.lastMain = updatedAt;
     if (canAccessFinance(this.profile.role)) {
       await setDoc(doc(firestore, "hub", "finance"), { d: JSON.stringify(finance), updatedAt });
+      this.lastFinance = updatedAt;
     }
-    await this.syncCentralAttendance(data);
+    await this.syncCentralAttendance(clean);
     await this.publishTeachers(data);
     try { await this.refreshMarketingProjection(data); }
     catch (error) { console.warn("Marketing statistics projection was not updated", error); }
-    this.baseData = clone({ ...data, finance: canAccessFinance(this.profile.role) ? finance : [] });
+    this.baseData = clone({ ...clean, finance: canAccessFinance(this.profile.role) ? finance : [] });
     return "saved";
   }
 
@@ -322,67 +391,167 @@ export class CloudRepository {
     await setDoc(doc(firestore, "hub", "marketing"), { d: JSON.stringify(marketingProjection(data)), updatedAt: Date.now() });
   }
 
-  private async reconcileAllAttendance(data: AcademyData): Promise<void> {
-    const snapshots = await getDocs(collection(firestore, "attendance"));
-    const values = new Map(data.attendance.map((item) => [attendanceKey(item), item]));
-    snapshots.forEach((snapshot) => {
-      const row = snapshot.data() as AttendanceDocument;
-      if (!row.date || !row.gid || !row.mid) return;
-      const record: AttendanceRecord = {
-        id: snapshot.id, date: row.date, gid: row.gid, mid: row.mid,
-        status: (row.status ?? "") as AttendanceRecord["status"], teacher: row.teacher ?? "", teacherUid: row.teacherUid ?? "", updatedAt: Number(row.updatedAt ?? 0)
-      };
-      const key = attendanceKey(record);
-      const old = values.get(key);
-      if (!old || record.updatedAt >= Number(old.updatedAt ?? 0)) values.set(key, record);
-      this.attendanceMirror.set(key, record.status);
+  private applyPendingAttendance(data: AcademyData): void {
+    const rows = new Map(data.attendance.map((record) => [attendanceKey(record), record]));
+    this.pendingAttendance.forEach(({ record }, key) => {
+      if (record) rows.set(key, record);
+      else rows.delete(key);
     });
-    data.attendance = [...values.values()];
+    data.attendance = [...rows.values()];
+  }
+
+  private async reconcileAllAttendance(data: AcademyData): Promise<void> {
+    await this.startAttendanceListener(data, false);
   }
 
   private async reconcileTeacherAttendance(data: AcademyData): Promise<void> {
-    const snapshots = await getDocs(query(collection(firestore, "attendance"), where("teacherUid", "==", this.user.uid)));
-    const values = new Map(data.attendance.map((item) => [attendanceKey(item), item]));
-    snapshots.forEach((snapshot) => {
-      const row = snapshot.data() as AttendanceDocument;
-      if (!row.date || !row.gid || !row.mid) return;
-      const record: AttendanceRecord = { id: snapshot.id, date: row.date, gid: row.gid, mid: row.mid, status: (row.status ?? "") as AttendanceRecord["status"], teacher: row.teacher ?? "", teacherUid: this.user.uid, updatedAt: Number(row.updatedAt ?? 0) };
-      const key = attendanceKey(record);
-      const old = values.get(key);
-      if (!old || record.updatedAt >= Number(old.updatedAt ?? 0)) values.set(key, record);
-      this.attendanceMirror.set(key, record.status);
+    await this.startAttendanceListener(data, true);
+  }
+
+  private async startAttendanceListener(data: AcademyData, teacherOnly: boolean): Promise<void> {
+    if (this.attendanceUnsubscribe) return;
+    this.attendanceReadyPromise = new Promise<void>((resolve, reject) => {
+      this.resolveAttendanceReady = resolve;
+      this.rejectAttendanceReady = reject;
     });
-    data.attendance = [...values.values()];
+    const source = teacherOnly
+      ? query(collection(firestore, "attendance"), where("teacherUid", "==", this.user.uid))
+      : collection(firestore, "attendance");
+    this.attendanceUnsubscribe = onSnapshot(source, (snapshot) => {
+      if (!this.attendanceSyncReady) {
+        const nextMirror = new Map<string, AttendanceRecord>();
+        const documentKeys = new Map<string, string>();
+        snapshot.forEach((entry) => {
+          const record = attendanceRecord(entry.id, entry.data());
+          if (!record) return;
+          const key = attendanceKey(record);
+          nextMirror.set(key, record);
+          documentKeys.set(entry.id, key);
+        });
+        this.attendanceMirror = nextMirror;
+        this.attendanceKeyByDocumentId = documentKeys;
+        data.attendance = mergeAttendanceRecords(data.attendance, [...nextMirror.values()], data.attendance);
+        this.attendanceSyncReady = true;
+        this.resolveAttendanceReady?.();
+        this.resolveAttendanceReady = null;
+        this.rejectAttendanceReady = null;
+        return;
+      }
+      const changes: AttendanceDelta[] = [];
+      snapshot.docChanges().forEach((change) => {
+        const documentId = change.doc.id;
+        const previousKey = this.attendanceKeyByDocumentId.get(documentId);
+        const previous = previousKey ? this.attendanceMirror.get(previousKey) : undefined;
+        if (change.type === "removed") {
+          if (previous) changes.push({ type: "remove", record: previous });
+          if (previousKey) this.attendanceMirror.delete(previousKey);
+          this.attendanceKeyByDocumentId.delete(documentId);
+          return;
+        }
+        const record = attendanceRecord(documentId, change.doc.data());
+        if (!record) {
+          if (previous) changes.push({ type: "remove", record: previous });
+          if (previousKey) this.attendanceMirror.delete(previousKey);
+          this.attendanceKeyByDocumentId.delete(documentId);
+          return;
+        }
+        const key = attendanceKey(record);
+        if (previousKey && previousKey !== key) {
+          if (previous) changes.push({ type: "remove", record: previous });
+          this.attendanceMirror.delete(previousKey);
+        }
+        const existing = this.attendanceMirror.get(key);
+        if (!sameAttendanceRecord(existing, record)) changes.push({ type: "upsert", record });
+        this.attendanceMirror.set(key, record);
+        this.attendanceKeyByDocumentId.set(documentId, key);
+      });
+      this.deliverAttendanceChanges(changes);
+    }, (error) => {
+      this.rejectAttendanceReady?.(error);
+      this.rejectAttendanceReady = null;
+      this.resolveAttendanceReady = null;
+      console.warn("Attendance listener unavailable", error);
+    });
+    await this.attendanceReadyPromise;
   }
 
   private async syncCentralAttendance(data: AcademyData): Promise<void> {
     const groupTeacherIds = await this.teacherGroupMap();
+    const revisions = new Map(this.pendingAttendance);
     const writes = data.attendance.map(async (row) => {
       const key = attendanceKey(row);
-      if (this.attendanceMirror.get(key) === row.status) return;
-      const reference = doc(firestore, "attendance", attendanceDocumentId(row));
-      if (!row.status) { if (this.attendanceMirror.has(key)) await deleteDoc(reference); }
-      else await setDoc(reference, { date: row.date, gid: row.gid, mid: row.mid, status: row.status, teacher: row.teacher ?? "", teacherUid: groupTeacherIds.get(row.gid) ?? "", updatedAt: row.updatedAt || Date.now() });
-      this.attendanceMirror.set(key, row.status);
+      const teacherUid = groupTeacherIds.get(row.gid) ?? "";
+      const outgoing = { ...row, teacher: row.teacher ?? "", teacherUid, updatedAt: row.updatedAt || Date.now() };
+      const previous = this.attendanceMirror.get(key);
+      if (!row.status) {
+        if (previous) await deleteDoc(doc(firestore, "attendance", attendanceDocumentId(row)));
+        this.attendanceMirror.delete(key);
+        this.attendanceKeyByDocumentId.delete(attendanceDocumentId(row));
+      } else if (!sameAttendanceRecord(previous, outgoing)) {
+        const documentId = attendanceDocumentId(row);
+        await setDoc(doc(firestore, "attendance", documentId), {
+          date: row.date, gid: row.gid, mid: row.mid, status: row.status, teacher: outgoing.teacher,
+          teacherUid, updatedAt: outgoing.updatedAt
+        });
+        this.attendanceMirror.set(key, outgoing);
+        this.attendanceKeyByDocumentId.set(documentId, key);
+      } else {
+        this.attendanceKeyByDocumentId.set(attendanceDocumentId(row), key);
+      }
+      this.clearSavedAttendanceIntent(key, revisions.get(key), row);
     });
-    const removals = removedAttendanceKeys(this.attendanceMirror.keys(), data.attendance).map(async (key) => {
+    const removals = [...revisions].filter(([, intent]) => intent.record === null).map(async ([key]) => {
       const [date, gid, mid] = key.split("|");
-      if (date && gid && mid) await deleteDoc(doc(firestore, "attendance", attendanceDocumentId({ date, gid, mid })));
+      if (date && gid && mid) {
+        const documentId = attendanceDocumentId({ date, gid, mid });
+        await deleteDoc(doc(firestore, "attendance", documentId));
+        this.attendanceKeyByDocumentId.delete(documentId);
+      }
       this.attendanceMirror.delete(key);
+      this.clearSavedAttendanceIntent(key, revisions.get(key), null);
     });
     await Promise.all([...writes, ...removals]);
   }
 
   private async syncTeacherAttendance(data: AcademyData): Promise<void> {
+    const revisions = new Map(this.pendingAttendance);
     const writes = data.attendance.map(async (row) => {
       const key = attendanceKey(row);
-      if (this.attendanceMirror.get(key) === row.status) return;
-      const reference = doc(firestore, "attendance", attendanceDocumentId(row));
-      if (!row.status) { if (this.attendanceMirror.has(key)) await deleteDoc(reference); }
-      else await setDoc(reference, { date: row.date, gid: row.gid, mid: row.mid, status: row.status, teacher: row.teacher ?? this.profile.teacherName, teacherUid: this.user.uid, updatedAt: row.updatedAt || Date.now() });
-      this.attendanceMirror.set(key, row.status);
+      const outgoing = { ...row, teacher: row.teacher ?? this.profile.teacherName, teacherUid: this.user.uid, updatedAt: row.updatedAt || Date.now() };
+      const previous = this.attendanceMirror.get(key);
+      if (!row.status) {
+        if (previous) await deleteDoc(doc(firestore, "attendance", attendanceDocumentId(row)));
+        this.attendanceMirror.delete(key);
+        this.attendanceKeyByDocumentId.delete(attendanceDocumentId(row));
+      } else if (!sameAttendanceRecord(previous, outgoing)) {
+        const documentId = attendanceDocumentId(row);
+        await setDoc(doc(firestore, "attendance", documentId), {
+          date: row.date, gid: row.gid, mid: row.mid, status: row.status,
+          teacher: outgoing.teacher, teacherUid: this.user.uid, updatedAt: outgoing.updatedAt
+        });
+        this.attendanceMirror.set(key, outgoing);
+        this.attendanceKeyByDocumentId.set(documentId, key);
+      } else {
+        this.attendanceKeyByDocumentId.set(attendanceDocumentId(row), key);
+      }
+      this.clearSavedAttendanceIntent(key, revisions.get(key), row);
     });
-    await Promise.all(writes);
+    const removals = [...revisions].filter(([, intent]) => intent.record === null).map(async ([key]) => {
+      const [date, gid, mid] = key.split("|");
+      if (date && gid && mid) {
+        const documentId = attendanceDocumentId({ date, gid, mid });
+        await deleteDoc(doc(firestore, "attendance", documentId));
+        this.attendanceKeyByDocumentId.delete(documentId);
+      }
+      this.attendanceMirror.delete(key);
+      this.clearSavedAttendanceIntent(key, revisions.get(key), null);
+    });
+    await Promise.all([...writes, ...removals]);
+  }
+
+  private clearSavedAttendanceIntent(key: string, saved: { revision: number; record: AttendanceRecord | null } | undefined, record: AttendanceRecord | null): void {
+    if (!saved || this.pendingAttendance.get(key)?.revision !== saved.revision) return;
+    if (record ? sameAttendanceRecord(saved.record ?? undefined, record) : saved.record === null) this.pendingAttendance.delete(key);
   }
 
   private async teacherGroupMap(): Promise<Map<string, string>> {
@@ -430,6 +599,10 @@ export class CloudRepository {
         await setDoc(doc(firestore, "teachers", userSnapshot.id), { d: payloadJson, gids, updatedAt: Date.now() });
         this.teacherProjectionSignatures.set(userSnapshot.id, signature);
       }));
-    } catch (error) { console.warn("Teacher projection publish skipped", error); }
+      this.teacherProjectionSyncPending = false;
+    } catch (error) {
+      this.teacherProjectionSyncPending = true;
+      console.warn("Teacher projection publish skipped", error);
+    }
   }
 }

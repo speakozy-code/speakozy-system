@@ -6,6 +6,7 @@ import { CloudRepository, mergeRemote, type CloudBackup } from "../services/clou
 import { EMPTY_DATA, type AcademyData, type AttendanceStatus, type Profile, type TeacherAccount } from "../domain/types";
 import { canAccessFinance, isMarketingRole } from "../domain/permissions";
 import { attendanceKey, deleteTeacher, ensureStudentCodes, pruneOrphanAttendance } from "../domain/utils";
+import { applyAttendanceDeltas } from "../domain/attendance-deltas";
 import { addAutomaticFormerCustomerCopies } from "../domain/automatic-former-copies";
 import { previewData } from "../domain/demo";
 
@@ -59,11 +60,13 @@ export function useAcademy() {
   const [toast, setToast] = useState<Toast | null>(null);
   const [backups, setBackups] = useState<CloudBackup[]>([]);
   const [backupsLoading, setBackupsLoading] = useState(false);
+  const [backupsLoaded, setBackupsLoaded] = useState(false);
   const [teacherAccounts, setTeacherAccounts] = useState<TeacherAccount[]>([]);
   const [error, setError] = useState("");
   const repository = useRef<CloudRepository | null>(null);
   const loadAttempt = useRef(0);
   const teacherUnsubscribe = useRef<(() => void) | null>(null);
+  const attendanceUnsubscribe = useRef<(() => void) | null>(null);
   const currentData = useRef(data);
   const saveQueue = useRef(Promise.resolve());
   const undoStack = useRef<string[]>([]);
@@ -86,14 +89,26 @@ export function useAcademy() {
     const attemptId = ++loadAttempt.current;
     setPhase("loading");
     setError("");
+    repository.current?.dispose();
+    repository.current = null;
+    teacherUnsubscribe.current?.();
+    teacherUnsubscribe.current = null;
+    attendanceUnsubscribe.current?.();
+    attendanceUnsubscribe.current = null;
+    setBackups([]);
+    setBackupsLoaded(false);
+    setBackupsLoading(false);
     let lastError: unknown;
     const waits = [0, 800, 1800];
     for (let attempt = 0; attempt < waits.length; attempt += 1) {
       if (waits[attempt]) await new Promise((resolve) => window.setTimeout(resolve, waits[attempt]));
       if (attemptId !== loadAttempt.current) return;
+      let attemptRepository: CloudRepository | null = null;
       try {
         await enableNetwork(firestore);
         const repo = new CloudRepository(user);
+        attemptRepository = repo;
+        repository.current?.dispose();
         repository.current = repo;
         const loaded = await repo.load();
         if (attemptId !== loadAttempt.current) return;
@@ -104,9 +119,8 @@ export function useAcademy() {
           catch (migrationError) { console.warn("Student-code migration will be retried on a later save", migrationError); }
         }
         setTeacherAccounts(repo.getTeacherDirectory());
-        if (loaded.profile.role !== "teacher" && !isMarketingRole(loaded.profile.role)) {
-          try { setBackups(await repo.listBackups()); } catch (backupError) { console.warn("Backup list unavailable", backupError); }
-        }
+        setBackups([]);
+        setBackupsLoaded(false);
         historyKey.current = `spk-hub-undo-${user.uid}`;
         undoStack.current = readHistory(historyKey.current);
         redoStack.current = readHistory(historyKey.current.replace("undo", "redo"));
@@ -118,16 +132,28 @@ export function useAcademy() {
         setProfile(loaded.profile);
         teacherUnsubscribe.current?.();
         teacherUnsubscribe.current = repo.watchTeacherAccounts(() => currentData.current, setTeacherAccounts);
+        attendanceUnsubscribe.current?.();
+        attendanceUnsubscribe.current = repo.watchAttendance((changes) => {
+          const current = currentData.current;
+          const attendance = applyAttendanceDeltas(current.attendance, changes);
+          if (attendance === current.attendance) return;
+          const next = { ...current, attendance };
+          currentData.current = next;
+          setData(next);
+          persistLocal(next);
+        });
         historyReady.current = true;
         setPhase("ready");
         return;
       } catch (loadError: unknown) {
+        attemptRepository?.dispose();
         lastError = loadError;
         console.error(`Speakozy load failed (attempt ${attempt + 1})`, loadError);
         if (!isTransientConnectionError(loadError) || attempt === waits.length - 1) break;
       }
     }
     if (attemptId !== loadAttempt.current) return;
+    repository.current?.dispose();
     repository.current = null;
     setError(readableLoadError(lastError));
     setPhase("error");
@@ -183,6 +209,7 @@ export function useAcademy() {
       redoStack.current = [];
       persistHistory();
     }
+    repository.current?.recordAttendanceIntent(currentData.current.attendance, next.attendance);
     currentData.current = next;
     setData(next);
     persistLocal(next);
@@ -200,6 +227,7 @@ export function useAcademy() {
       if (target.length > 50) target.shift();
       const next = clone(JSON.parse(snapshot) as AcademyData);
       if (!canAccessFinance(profile?.role)) next.finance = [];
+      repository.current?.recordAttendanceIntent(currentData.current.attendance, next.attendance);
       currentData.current = next;
       setData(next);
       persistLocal(next);
@@ -218,10 +246,15 @@ export function useAcademy() {
     const repo = repository.current;
     if (!repo || import.meta.env.DEV || repo.profile.role === "teacher" || isMarketingRole(repo.profile.role)) { setBackups([]); return []; }
     setBackupsLoading(true);
-    try { const values = await repo.listBackups(); setBackups(values); return values; }
+    try { const values = await repo.listBackups(); setBackups(values); setBackupsLoaded(true); return values; }
     catch (backupError) { console.warn("Backup list unavailable", backupError); return []; }
     finally { setBackupsLoading(false); }
   }, []);
+
+  const loadBackups = useCallback(async () => {
+    if (backupsLoaded) return backups;
+    return refreshBackups();
+  }, [backupsLoaded, backups, refreshBackups]);
 
   const refreshMarketingProjection = useCallback(async () => {
     if (profile?.role !== "owner") return;
@@ -316,10 +349,15 @@ export function useAcademy() {
       if (dataTimer !== undefined) window.clearTimeout(dataTimer);
       if (!user) {
         loadAttempt.current += 1;
+        repository.current?.dispose();
+        repository.current = null;
         teacherUnsubscribe.current?.();
         teacherUnsubscribe.current = null;
-        repository.current = null;
+        attendanceUnsubscribe.current?.();
+        attendanceUnsubscribe.current = null;
         setTeacherAccounts([]);
+        setBackups([]);
+        setBackupsLoaded(false);
         setProfile(null);
         setPhase("signed-out");
         return;
@@ -328,7 +366,12 @@ export function useAcademy() {
       dataTimer = window.setTimeout(() => {
         if (!active || loadFinished) return;
         loadAttempt.current += 1;
+        repository.current?.dispose();
         repository.current = null;
+        teacherUnsubscribe.current?.();
+        teacherUnsubscribe.current = null;
+        attendanceUnsubscribe.current?.();
+        attendanceUnsubscribe.current = null;
         setError("استغرق تحميل بيانات النظام أكثر من دقيقة. أعد المحاولة، وإذا استمر الخطأ أرسل هذه الرسالة للدعم.");
         setPhase("error");
       }, DATA_LOAD_TIMEOUT_MS);
@@ -343,8 +386,12 @@ export function useAcademy() {
       if (dataTimer !== undefined) window.clearTimeout(dataTimer);
       loadAttempt.current += 1;
       unsubscribe();
+      repository.current?.dispose();
+      repository.current = null;
       teacherUnsubscribe.current?.();
       teacherUnsubscribe.current = null;
+      attendanceUnsubscribe.current?.();
+      attendanceUnsubscribe.current = null;
     };
   }, [loadUser]);
 
@@ -389,6 +436,6 @@ export function useAcademy() {
     return () => window.clearInterval(timer);
   }, [phase, profile?.role, data, enqueueSave, persistLocal]);
 
-  const api = useMemo(() => ({ phase, profile, data, saving, toast, error, commit, setAttendance, login, logout, retryConnection, setToast, undo, redo, canUndo: undoStack.current.length > 0, canRedo: redoStack.current.length > 0, backups, backupsLoading, refreshBackups, refreshMarketingProjection, deleteTeacherFromSystem, teacherAccounts }), [phase, profile, data, saving, toast, error, commit, setAttendance, login, logout, retryConnection, undo, redo, backups, backupsLoading, refreshBackups, refreshMarketingProjection, deleteTeacherFromSystem, teacherAccounts]);
+  const api = useMemo(() => ({ phase, profile, data, saving, toast, error, commit, setAttendance, login, logout, retryConnection, setToast, undo, redo, canUndo: undoStack.current.length > 0, canRedo: redoStack.current.length > 0, backups, backupsLoading, refreshBackups, loadBackups, refreshMarketingProjection, deleteTeacherFromSystem, teacherAccounts }), [phase, profile, data, saving, toast, error, commit, setAttendance, login, logout, retryConnection, undo, redo, backups, backupsLoading, refreshBackups, loadBackups, refreshMarketingProjection, deleteTeacherFromSystem, teacherAccounts]);
   return api;
 }
