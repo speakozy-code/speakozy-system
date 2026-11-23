@@ -8,6 +8,11 @@ import { createRequire } from "node:module";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const tempRoot = mkdtempSync(join(tmpdir(), "speakozy-domain-tests-"));
+const appSource = readFileSync(join(projectRoot, "src/app/App.tsx"), "utf8");
+const appShellStart = appSource.indexOf("function AppShell()");
+const noticesMemo = appSource.indexOf("const notices = useMemo", appShellStart);
+const loadingReturn = appSource.indexOf('if (academy.phase === "loading") return <Loading />;', appShellStart);
+assert.ok(appShellStart >= 0 && noticesMemo > appShellStart && loadingReturn > noticesMemo, "AppShell hooks must stay above phase-dependent early returns");
 const modules = [
   ["src/domain/utils.ts", "domain/utils.js"],
   ["src/domain/lifecycle.ts", "domain/lifecycle.js"],

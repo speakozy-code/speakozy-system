@@ -378,13 +378,15 @@ function AppShell() {
     return () => window.clearTimeout(timer);
   }, [groupFocusId, selectedGroup, tab]);
 
+  // Keep hooks above phase-dependent returns so auth transitions preserve hook order.
+  const notices = useMemo(() => profile ? deriveNotices(data, profile.role, profile.teacherName) : [], [data, profile?.role, profile?.teacherName, noticePulse]);
+
   if (academy.phase === "loading") return <Loading />;
   if (academy.phase === "signed-out") return window.location.pathname === "/login.html" ? <Login error={academy.error} onLogin={academy.login} /> : <Loading />;
   if (academy.phase === "error") return <main className="auth-page"><section className="auth-card"><div className="auth-mark"><div className="auth-mark__badge"><ShieldCheck size={23} /></div><div><strong>SPEAKOZY</strong><small>نظام إدارة الأكاديمية</small></div></div><h1>تعذر فتح النظام</h1><p>{academy.error || "تعذر تحميل البيانات أو صلاحيات هذا الحساب."}</p><div className="error-actions"><button className="btn" onClick={academy.retryConnection}>إعادة المحاولة</button><button className="btn btn--ghost" onClick={academy.logout}>العودة لتسجيل الدخول</button></div></section></main>;
   if (!profile) return <Loading />;
 
   const tabs = visibleTabs(profile.role);
-  const notices = useMemo(() => deriveNotices(data, profile.role, profile.teacherName), [data, profile.role, profile.teacherName, noticePulse]);
   const chooseTab = (next: Tab) => { setTab(next); setDrawer(false); setNoticesOpen(false); if (next === "attendance") setSelectedGroup(""); };
   const openAttendance = (groupId?: string) => { setSelectedGroup(groupId ?? ""); setTab("attendance"); setDrawer(false); setNoticesOpen(false); };
   const openTeacherGroup = (requested: AcademyGroup) => {
