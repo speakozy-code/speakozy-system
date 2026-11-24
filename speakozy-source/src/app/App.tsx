@@ -10,6 +10,7 @@ import { canAccessFinance, canAccessMarketingAnalytics, isMarketingRole } from "
 import { activeAttendanceRecords, activeGroups, activeStudentsOf, archiveTeacher, attendanceFor, canAddStudentToGroup, canAssignTeacher, colourForGroup, copyStudentForGroup, currentStudentCounts, expenseForMonth, formerStudents, formatDate, formatTime, groupDays, groupLabel, groupTime, incomeForMonth, incomeStudentsByKindForMonth, incomeStudentsForMonth, isEnrolledStudent, isRoundActive, isStudentCodeQuery, isTeacherArchived, isTeacherDeleted, isTeacherNameArchived, isTerminalLead, leadBucket, leadCategory, leadFollowupDate, LEAD_FOLLOWUP_OPTIONS, LEVEL_COUNTS, LEVELS, live, matchesStudentCode, monthKey, nonArchivedGroups, normalise, parseIsoDate, privateGroupCanAccept, removeStudentAttendance, restoreTeacher, roundName, safeCopy, saveTeacherWeeklyHours, sortLeads, studentKind, studentKindLabel, studentSourceLabel, STUDENT_SOURCES, studentsInNonArchivedGroups, studentsInRound, studentsOf, teacherNames, toIsoDate, uid, uniquePhoneNumbers, WEEKDAYS } from "../domain/utils";
 import { allTeacherScheduleConflicts, cancelSession, durationHours, ensureEightActiveSessions, feedbackSessionsDue, generateSessions, monthTeacherHours, plannedGroupEndDate, rescheduleGroupPreservingAttendance, rescheduleSession, restoreSession, scheduledSessionsOnDate, sessionsOf, teacherScheduleConflicts, teacherSessionsForMonth, weeklyScheduledHours } from "../domain/schedule";
 import { isGroupOperationalToday } from "../domain/lifecycle";
+import { hasActiveStudentEnrollment, isActiveStudentEnrollment, personPhone, samePerson, sameStudentIdentity, studentCodeFor, type PersonRecord } from "../domain/customer-stage";
 import { retentionByMonth } from "../domain/retention";
 import { dataQualityIssues } from "../domain/data-quality";
 import { AUTOMATIC_LEAD_FOLLOWUP_INTERVAL_MS, AUTOMATIC_STUDENT_FOLLOWUP_INTERVAL_MS, isAutomaticFollowupDue } from "../domain/followup";
@@ -758,7 +759,7 @@ function SmartRenewalPanel({ data, notices, onTab, onOpenGroup, onOpenNotice }: 
 }
 function DataQualityPanel({ data, onTab, onOpenGroup }: { data: AcademyData; onTab: (tab: Tab) => void; onOpenGroup: (group: AcademyGroup) => void }) {
   const issues = dataQualityIssues(data);
-  const labels: Record<string, string> = { "duplicate-phone": "أرقام مكررة", "student-details": "بيانات طالب ناقصة", "missing-group": "طلاب بلا جروب", "group-setup": "إعداد جروب ناقص", source: "مصدر غير محدد" };
+  const labels: Record<string, string> = { "live-duplicate": "تكرار حي", "duplicate-phone": "أرقام مكررة", "student-details": "بيانات طالب ناقصة", "missing-group": "طلاب بلا جروب", "group-setup": "إعداد جروب ناقص", source: "مصدر غير محدد" };
   const counts = [...new Set(issues.map((issue) => issue.kind))].map((kind) => ({ kind, count: issues.filter((issue) => issue.kind === kind).length }));
   return <section className="section"><div className="section-head"><div><h2>مراجعة جودة البيانات</h2><p>كشف السجلات التي تحتاج استكمالًا أو مراجعة؛ لا يتم تعديل أي بيانات تلقائيًا.</p></div><span className={`tag ${issues.length ? "tag--warning" : "tag--muted"}`}>{issues.length} ملاحظة</span></div>
     {issues.length ? <><div className="quality-summary">{counts.map((item) => <span className="tag tag--muted" key={item.kind}>{labels[item.kind] || item.kind}: {item.count}</span>)}</div><div className="card-list quality-issues">{issues.slice(0, 8).map((issue) => <div className="entity-card" key={issue.id}><div className="entity-card__top"><div><h3>{issue.title}</h3><p>{issue.detail}</p></div><span className="tag tag--warning">{labels[issue.kind] || "مراجعة"}</span></div><div className="entity-card__actions"><button className="btn btn--ghost btn--small" onClick={() => { const group = issue.groupId ? data.g.find((item) => item.id === issue.groupId) : undefined; if (group) onOpenGroup(group); else onTab("groups"); }}>مراجعة السجل</button></div></div>)}</div>{issues.length > 8 && <p className="quality-more">يعرض أول 8 ملاحظات من أصل {issues.length}.</p>}</> : <div className="empty">لم تظهر مشكلات بيانات تحتاج مراجعة.</div>}
@@ -1641,34 +1642,6 @@ function ScriptsView({ data, commit }: { data: AcademyData; commit: Commit }) {
     {viewingScript && <Overlay onClose={() => setViewingScript(null)}><section className="section script-view-dialog"><div className="section-head"><div><h2>{viewingScript.title}</h2><p>{kindLabels[viewingScript.kind]}{viewingScript.category ? ` · ${viewingScript.category}` : ""}</p></div><button className="btn btn--ghost btn--icon" type="button" onClick={() => setViewingScript(null)} aria-label="إغلاق"><X size={17} /></button></div><div className="script-card__body script-view-dialog__body">{viewingScript.body}</div><div className="toolbar"><button className="btn btn--small" type="button" onClick={() => void copyScript(viewingScript)}><Copy size={14} />نسخ</button><button className="btn btn--ghost btn--small" type="button" onClick={() => { editScript(viewingScript); setViewingScript(null); }}>تعديل</button></div>{copyMessage && copiedId === viewingScript.id && <p className="script-copy-feedback" role="status">{copyMessage}</p>}</section></Overlay>}
   </>;
 }
-type PersonRecord = { id: string; profileId?: string; n?: string; ph?: string; movedToLeadId?: string; movedFromStudentId?: string; copiedFromStudentId?: string };
-
-function studentCodeFor(record: { studentCode?: string; profileId?: string; movedFromStudentId?: string; copiedFromStudentId?: string; id: string }): string {
-  const stableId = String(record.profileId || record.movedFromStudentId || record.copiedFromStudentId || record.id);
-  return record.studentCode || `SPK-${stableId}`;
-}
-
-function personPhone(value?: string): string {
-  return String(value ?? "").replace(/[٠-٩۰-۹]/g, (digit) => String("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹".indexOf(digit) % 10)).replace(/\D/g, "");
-}
-
-function samePerson(first: PersonRecord, second: PersonRecord): boolean {
-  const firstIds = [first.profileId, first.id, first.movedToLeadId, first.movedFromStudentId, first.copiedFromStudentId].filter(Boolean);
-  const secondIds = [second.profileId, second.id, second.movedToLeadId, second.movedFromStudentId, second.copiedFromStudentId].filter(Boolean);
-  if (firstIds.some((id) => secondIds.includes(id))) return true;
-  const firstPhone = personPhone(first.ph);
-  const secondPhone = personPhone(second.ph);
-  if (firstPhone.length >= 8 && secondPhone.length >= 8) return firstPhone.slice(-9) === secondPhone.slice(-9);
-  return firstPhone.length < 8 && secondPhone.length < 8 && Boolean(normalise(first.n)) && normalise(first.n) === normalise(second.n);
-}
-
-function sameStudentIdentity(first: PersonRecord, second: PersonRecord): boolean {
-  if (samePerson(first, second)) return true;
-  const firstCode = studentCodeFor(first).toLocaleUpperCase();
-  const secondCode = studentCodeFor(second).toLocaleUpperCase();
-  return firstCode === secondCode;
-}
-
 function displayStudentName(student: Student, data: AcademyData): string {
   const clean = (value?: string) => {
     const name = String(value ?? "").trim();
@@ -1689,17 +1662,6 @@ function archiveRelatedLeads(data: AcademyData, student: Student, stamp = Date.n
 
 function isListedInFormerCustomers(student: Student, data: AcademyData): boolean {
   return data.m.some((copy) => copy.movedToTab === "renewals" && copy.copiedFromStudentId === student.id);
-}
-
-function isActiveStudentEnrollment(student: Student, data: AcademyData): boolean {
-  if (student.x || !isEnrolledStudent(student)) return false;
-  const group = data.g.find((item) => item.id === student.g);
-  if (!group || group.x || !isGroupOperationalToday(group)) return false;
-  return group.p ? true : isRoundActive(data, group.r);
-}
-
-function hasActiveStudentEnrollment(person: PersonRecord, data: AcademyData): boolean {
-  return live(data.m).some((student) => sameStudentIdentity(person, student) && isActiveStudentEnrollment(student, data));
 }
 
 function leadHasStudentRecord(lead: Lead, data: AcademyData): boolean {

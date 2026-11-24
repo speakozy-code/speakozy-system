@@ -1,6 +1,7 @@
 import type { AcademyData, AcademyGroup, Student } from "./types";
 import { isEnrolledStudent, nonArchivedGroups, normalise, toIsoDate } from "./utils";
 import { plannedGroupEndDate } from "./schedule";
+import { hasActiveStudentEnrollment, sameStudentIdentity } from "./customer-stage";
 
 function sameStudent(first: Student, second: Student): boolean {
   if (first.profileId && second.profileId) return first.profileId === second.profileId;
@@ -51,9 +52,13 @@ export function addAutomaticFormerCustomerCopies(
     const endDate = plannedGroupEndDate(group);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(endDate) || endDate >= today) return;
     const alreadyCopied = data.m.some((student) =>
-      student.copiedFromStudentId === source.id && student.movedToTab === "renewals"
+      !student.x && student.movedToTab === "renewals"
+      && (student.copiedFromStudentId === source.id || sameStudentIdentity(source, student))
     );
-    if (alreadyCopied || hasLaterEnrollment(data, source, group)) return;
+    const hasLiveLead = (data.l ?? []).some((lead) => !lead.x && !lead.convertedStudentId && sameStudentIdentity(source, lead));
+    // One live place per person: never copy someone who is enrolled in a running
+    // round/Private, already listed as a former customer, or already a live lead.
+    if (alreadyCopied || hasLiveLead || hasActiveStudentEnrollment(source, data) || hasLaterEnrollment(data, source, group)) return;
 
     data.m.push({
       ...source,
