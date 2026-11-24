@@ -20,6 +20,7 @@ const modules = [
   ["src/domain/demo.ts", "domain/demo.js"],
   ["src/domain/retention.ts", "domain/retention.js"],
   ["src/domain/customer-stage.ts", "domain/customer-stage.js"],
+  ["src/domain/duplicate-cleanup.ts", "domain/duplicate-cleanup.js"],
   ["src/domain/automatic-former-copies.ts", "domain/automatic-former-copies.js"],
   ["src/domain/data-quality.ts", "domain/data-quality.js"],
   ["src/domain/permissions.ts", "domain/permissions.js"],
@@ -47,6 +48,7 @@ try {
   const require = createRequire(import.meta.url);
   const { toIsoDate, privateGroupCanAccept, canAddStudentToGroup, copyStudentForGroup, attendanceKey, attendanceFor, activeAttendanceRecords, activeGroups, archiveTeacher, canAssignTeacher, currentStudentCounts, deleteTeacher, ensureStudentCodes, expenseForMonth, formerStudents, incomeForMonth, incomeStudentsByKindForMonth, incomeStudentsForMonth, isEnrolledStudent, isStudentCodeQuery, isTeacherArchived, isTeacherDeleted, isTeacherNameArchived, LEVELS, LEVEL_COUNTS, matchesStudentCode, normalizeStudentCode, nonArchivedGroups, removeStudentAttendance, restoreTeacher, saveTeacherWeeklyHours, studentKind, studentKindLabel, studentSourceLabel, studentsInNonArchivedGroups, studentsInRound, teacherNames, totalCurrentStudents, uniquePhoneNumbers } = require(join(tempRoot, "domain/utils.js"));
   const { retentionByMonth } = require(join(tempRoot, "domain/retention.js"));
+  const { planDuplicateCleanup, applyDuplicateCleanup, undoDuplicateCleanup, cleanupBatches } = require(join(tempRoot, "domain/duplicate-cleanup.js"));
   const { customerStage, findLiveDuplicates, hasActiveStudentEnrollment } = require(join(tempRoot, "domain/customer-stage.js"));
   const { addAutomaticFormerCustomerCopies } = require(join(tempRoot, "domain/automatic-former-copies.js"));
   const { previewData } = require(join(tempRoot, "domain/demo.js"));
@@ -519,6 +521,25 @@ try {
   assert.equal(customerStage(liveSameProfile, duplicateLive), "group", "an actively enrolled person resolves to the group stage");
   assert.equal(findLiveDuplicates({ ...autoFormerData, l: duplicateLive.l }).length, 0, "finished-round history alone is not a live duplicate");
   assert.equal(customerStage(autoFormerSource, { ...autoFormerData, l: [{ id: "next-lead", profileId: autoFormerSource.profileId, bucket: "next" }] }), "next", "a finished student with a next-round lead resolves to next");
+  const cleanupBase = { ...autoFormerLive, m: [autoFormerSource, liveSameProfile, { ...autoFormerSource, id: "cleanup-copy-auto", copiedFromStudentId: autoFormerSource.id, movedToTab: "renewals", formerAt: 100, autoFormerCustomer: true, ren: 2 }, { ...autoFormerSource, id: "cleanup-copy-manual", copiedFromStudentId: autoFormerSource.id, movedToTab: "renewals", formerAt: 200, ren: 2 }], l: [{ id: "cl-live-lead", profileId: autoFormerSource.profileId, n: "x", ph: autoFormerSource.ph, ts: 50 }] };
+  const cleanupPlan = planDuplicateCleanup(cleanupBase);
+  assert.deepEqual(cleanupPlan.actions.map((item) => `${item.record}:${item.reason}`).sort(), ["lead:lead-of-enrolled", "student:former-copy-of-enrolled", "student:former-copy-of-enrolled"], "cleanup archives the lead and former copies of an enrolled person, never the enrollment itself");
+  assert.equal(cleanupPlan.actions.some((item) => item.id === liveSameProfile.id || item.id === autoFormerSource.id), false, "enrollment rows are never archived by cleanup");
+  const twoCopies = { ...autoFormerData, l: [], m: [autoFormerSource, { ...autoFormerSource, id: "tc-auto", copiedFromStudentId: autoFormerSource.id, movedToTab: "renewals", formerAt: 100, autoFormerCustomer: true, ren: 2 }, { ...autoFormerSource, id: "tc-manual", copiedFromStudentId: autoFormerSource.id, movedToTab: "renewals", formerAt: 200, ren: 2 }] };
+  const twoCopiesPlan = planDuplicateCleanup(twoCopies);
+  assert.deepEqual(twoCopiesPlan.actions.map((item) => item.id), ["tc-auto"], "cleanup keeps the manual former copy over the automatic one");
+  const followupLead = { ...cleanupBase, g: autoFormerData.g, m: [autoFormerSource, { ...autoFormerSource, id: "only-copy", copiedFromStudentId: autoFormerSource.id, movedToTab: "renewals", formerAt: 500, ren: 2 }], l: [{ id: "fl-1", profileId: autoFormerSource.profileId, n: "y", ph: autoFormerSource.ph, ts: 10, followupCat: "interested" }, { id: "fl-2", profileId: autoFormerSource.profileId, n: "y", ph: autoFormerSource.ph, ts: 20 }] };
+  const followupPlan = planDuplicateCleanup(followupLead);
+  assert.deepEqual(followupPlan.actions.map((item) => item.id), ["fl-2"], "cleanup archives the older lead without follow-up only");
+  assert.deepEqual(followupPlan.needsDecision.map((item) => item.id), ["fl-1"], "a duplicate lead that carries follow-up data is left for the owner");
+  const cleanupCopy = JSON.parse(JSON.stringify(cleanupBase));
+  const cleanupResult = applyDuplicateCleanup(cleanupCopy, planDuplicateCleanup(cleanupCopy), 777);
+  assert.equal(cleanupResult.archived, 3, "cleanup archives the planned rows");
+  assert.equal(findLiveDuplicates(cleanupCopy).length, 0, "no live duplicates remain after cleanup");
+  assert.equal(planDuplicateCleanup(cleanupCopy).actions.length, 0, "cleanup is idempotent");
+  assert.equal(cleanupBatches(cleanupCopy)[0].count, 3, "cleanup batch is listed for undo");
+  assert.equal(undoDuplicateCleanup(cleanupCopy, cleanupResult.tag), 3, "undo restores the batch");
+  assert.deepEqual(cleanupCopy, cleanupBase, "undo returns the data to its exact original state");
   const stoppedRoundData = { ...archiveData, r: archiveData.r.map((round) => round.id === "round-active" ? { ...round, on: false } : round) };
   assert.equal(currentStudentCounts(stoppedRoundData).total, 1, "stopping a round removes its group students from current dashboard totals while Private remains active");
   assert.equal(retentionByMonth(stoppedRoundData).flatMap((row) => row.registrations).some((row) => row.student.id === "student-active-group"), true, "stopping a round does not erase its non-archived cohort from retention");
