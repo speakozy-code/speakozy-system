@@ -19,6 +19,7 @@ const modules = [
   ["src/domain/schedule.ts", "domain/schedule.js"],
   ["src/domain/demo.ts", "domain/demo.js"],
   ["src/domain/retention.ts", "domain/retention.js"],
+  ["src/domain/customer-stage.ts", "domain/customer-stage.js"],
   ["src/domain/automatic-former-copies.ts", "domain/automatic-former-copies.js"],
   ["src/domain/data-quality.ts", "domain/data-quality.js"],
   ["src/domain/permissions.ts", "domain/permissions.js"],
@@ -46,6 +47,7 @@ try {
   const require = createRequire(import.meta.url);
   const { toIsoDate, privateGroupCanAccept, canAddStudentToGroup, copyStudentForGroup, attendanceKey, attendanceFor, activeAttendanceRecords, activeGroups, archiveTeacher, canAssignTeacher, currentStudentCounts, deleteTeacher, ensureStudentCodes, expenseForMonth, formerStudents, incomeForMonth, incomeStudentsByKindForMonth, incomeStudentsForMonth, isEnrolledStudent, isStudentCodeQuery, isTeacherArchived, isTeacherDeleted, isTeacherNameArchived, LEVELS, LEVEL_COUNTS, matchesStudentCode, normalizeStudentCode, nonArchivedGroups, removeStudentAttendance, restoreTeacher, saveTeacherWeeklyHours, studentKind, studentKindLabel, studentSourceLabel, studentsInNonArchivedGroups, studentsInRound, teacherNames, totalCurrentStudents, uniquePhoneNumbers } = require(join(tempRoot, "domain/utils.js"));
   const { retentionByMonth } = require(join(tempRoot, "domain/retention.js"));
+  const { customerStage, findLiveDuplicates, hasActiveStudentEnrollment } = require(join(tempRoot, "domain/customer-stage.js"));
   const { addAutomaticFormerCustomerCopies } = require(join(tempRoot, "domain/automatic-former-copies.js"));
   const { previewData } = require(join(tempRoot, "domain/demo.js"));
   const { canAccessFinance, canAccessMarketingAnalytics, isMarketingRole } = require(join(tempRoot, "domain/permissions.js"));
@@ -504,6 +506,19 @@ try {
   const autoFormerRenewed = { ...autoFormerData, g: [...autoFormerData.g, { id: "auto-former-new-group", r: "auto-former-round", s: "2026-11-09", e: "2026-12-31" }], m: [...autoFormerData.m, { ...autoFormerSource, id: "auto-former-new-enrollment", g: "auto-former-new-group" }] };
   assert.equal(addAutomaticFormerCustomerCopies(autoFormerRenewed, "2026-11-09", 9999), 0, "a student registered in a later group is not copied to Customers Old");
   assert.equal(addAutomaticFormerCustomerCopies(autoFormerData, "2026-11-08", 9999), 0, "a group is not completed until the last scheduled date has passed");
+  const liveGroup = { id: "auto-former-live-group", r: "round-active", s: "2026-09-01", e: "2099-01-01" };
+  const liveSameProfile = { ...autoFormerSource, id: "auto-former-live-student", g: liveGroup.id, r: "round-active", ren: 0 };
+  const autoFormerLive = { ...autoFormerData, m: [autoFormerSource, liveSameProfile], g: [...autoFormerData.g, liveGroup] };
+  assert.equal(hasActiveStudentEnrollment(autoFormerSource, autoFormerLive), true, "a person with a running enrollment elsewhere is detected as live");
+  assert.equal(addAutomaticFormerCustomerCopies(autoFormerLive, "2026-11-09", 1), 0, "a person enrolled in a running round gets no automatic copy in another tab");
+  const autoFormerLead = { ...autoFormerData, m: [autoFormerSource], l: [{ id: "auto-lead", profileId: autoFormerSource.profileId, n: "طالب انتهى جروبه", ph: autoFormerSource.ph }] };
+  assert.equal(addAutomaticFormerCustomerCopies(autoFormerLead, "2026-11-09", 1), 0, "a person who is already a live lead is not duplicated into former customers");
+  assert.equal(isEnrolledStudent(autoFormerSource), true, "the finished-round student row is kept as history");
+  const duplicateLive = { ...autoFormerLive, l: [{ id: "dup-lead", profileId: autoFormerSource.profileId, n: "طالب انتهى جروبه", ph: autoFormerSource.ph }] };
+  assert.deepEqual(findLiveDuplicates(duplicateLive).map((item) => item.kind), ["active-and-lead"], "a live lead for an actively enrolled person is reported");
+  assert.equal(customerStage(liveSameProfile, duplicateLive), "group", "an actively enrolled person resolves to the group stage");
+  assert.equal(findLiveDuplicates({ ...autoFormerData, l: duplicateLive.l }).length, 0, "finished-round history alone is not a live duplicate");
+  assert.equal(customerStage(autoFormerSource, { ...autoFormerData, l: [{ id: "next-lead", profileId: autoFormerSource.profileId, bucket: "next" }] }), "next", "a finished student with a next-round lead resolves to next");
   const stoppedRoundData = { ...archiveData, r: archiveData.r.map((round) => round.id === "round-active" ? { ...round, on: false } : round) };
   assert.equal(currentStudentCounts(stoppedRoundData).total, 1, "stopping a round removes its group students from current dashboard totals while Private remains active");
   assert.equal(retentionByMonth(stoppedRoundData).flatMap((row) => row.registrations).some((row) => row.student.id === "student-active-group"), true, "stopping a round does not erase its non-archived cohort from retention");

@@ -1,9 +1,10 @@
 import type { AcademyData, AcademyGroup, Student } from "./types";
+import { findLiveDuplicates } from "./customer-stage";
 import { isEnrolledStudent, live, nonArchivedGroups, normalise, studentKind } from "./utils";
 
 export interface DataQualityIssue {
   id: string;
-  kind: "duplicate-phone" | "student-details" | "missing-group" | "group-setup" | "source";
+  kind: "live-duplicate" | "duplicate-phone" | "student-details" | "missing-group" | "group-setup" | "source";
   title: string;
   detail: string;
   groupId?: string;
@@ -71,6 +72,15 @@ export function dataQualityIssues(data: AcademyData): DataQualityIssue[] {
     if (!group.t1 || !group.t2) missing.push("وقت الجلسة");
     if (!validDate(group.s)) missing.push("تاريخ البداية");
     if (missing.length) issues.push({ id: `group:${group.id}`, kind: "group-setup", title: `${group.p ? "Private" : "جروب"} غير مكتمل: ${group.lv?.trim() || "بدون اسم"}`, detail: `أكمل ${missing.join("، ")}.`, groupId: group.id });
+  });
+
+  const duplicateLabels = {
+    "active-and-lead": "مسجل في راوند شغال وله ليد حي كمان",
+    "active-and-former-copy": "مسجل في راوند شغال وله نسخة في عملاء الراوند الجاي",
+    "active-twice": "مسجل في أكتر من جروب/Private شغالين"
+  } as const;
+  findLiveDuplicates(data).forEach((item) => {
+    issues.push({ id: `live:${item.kind}:${item.ids.join(",")}`, kind: "live-duplicate", title: `تكرار حي: ${item.person}`, detail: `${duplicateLabels[item.kind]}${item.phone ? ` · ${item.phone}` : ""}. للمراجعة فقط، لا يُحذف شيء تلقائيًا.` });
   });
 
   return issues.sort((a, b) => a.kind.localeCompare(b.kind) || normalise(a.title).localeCompare(normalise(b.title), "ar"));
