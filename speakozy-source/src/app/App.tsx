@@ -1,4 +1,4 @@
-import { memo, type ElementType, type FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { memo, type ElementType, type FormEvent, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArchiveRestore, ArrowUp, BarChart3, Bell, BellRing, BookOpenCheck, CalendarDays, Check, ChevronDown,
   ClipboardCheck, Copy, DollarSign, FileDown, GraduationCap, LayoutDashboard, ListChecks,
@@ -758,7 +758,7 @@ function SmartRenewalPanel({ data, notices, onTab, onOpenGroup, onOpenNotice }: 
   })}</div> : <div className="empty">لا توجد تنبيهات تشغيلية مستحقة الآن.</div>}</section>;
 }
 function DataQualityPanel({ data, onTab, onOpenGroup }: { data: AcademyData; onTab: (tab: Tab) => void; onOpenGroup: (group: AcademyGroup) => void }) {
-  const issues = dataQualityIssues(data);
+  const issues = useMemo(() => dataQualityIssues(data), [data]);
   const labels: Record<string, string> = { "live-duplicate": "تكرار حي", "duplicate-phone": "أرقام مكررة", "student-details": "بيانات طالب ناقصة", "missing-group": "طلاب بلا جروب", "group-setup": "إعداد جروب ناقص", source: "مصدر غير محدد" };
   const counts = [...new Set(issues.map((issue) => issue.kind))].map((kind) => ({ kind, count: issues.filter((issue) => issue.kind === kind).length }));
   return <section className="section"><div className="section-head"><div><h2>مراجعة جودة البيانات</h2><p>كشف السجلات التي تحتاج استكمالًا أو مراجعة؛ لا يتم تعديل أي بيانات تلقائيًا.</p></div><span className={`tag ${issues.length ? "tag--warning" : "tag--muted"}`}>{issues.length} ملاحظة</span></div>
@@ -2620,13 +2620,28 @@ function SearchOverlay({ data, profile, onClose, onGroup, onStudent, onLead }: {
   const [teacherFilter, setTeacherFilter] = useState("");
   const [paymentFilter, setPaymentFilter] = useState("");
   const [renewalFilter, setRenewalFilter] = useState("");
-  const text = query.trim().toLocaleLowerCase();
-  const archivedTeacher = profile.role === "teacher" && isTeacherNameArchived(data, profile.teacherName);
-  const visibleGroups = archivedTeacher ? [] : activeGroups(data).filter((group) => (profile.role !== "teacher" || normalise(group.tc) === normalise(profile.teacherName))
-    && (!group.p || !live(data.m).some((student) => student.g === group.id && !student.x) || live(data.m).some((student) => student.g === group.id && isActiveStudentEnrollment(student, data) && !isListedInFormerCustomers(student, data))));
-  const visibleIds = new Set(visibleGroups.map((group) => group.id));
-  const formerStudents = profile.role === "teacher" ? [] : formerCustomerRows(data).filter((student) => !hasActiveStudentEnrollment(student, data));
-  const formerStudentIds = new Set(formerStudents.map((student) => student.id));
+  const deferredQuery = useDeferredValue(query);
+  const text = deferredQuery.trim().toLocaleLowerCase();
+  // Everything that does not depend on the typed text is computed once per data change,
+  // not on every keystroke (these scans are quadratic in the number of students).
+  const base = useMemo(() => {
+    const archivedTeacher = profile.role === "teacher" && isTeacherNameArchived(data, profile.teacherName);
+    const listedIds = new Set(data.m.filter((copy) => copy.movedToTab === "renewals" && copy.copiedFromStudentId).map((copy) => copy.copiedFromStudentId));
+    const liveStudents = live(data.m);
+    const activeIds = new Set(liveStudents.filter((student) => isActiveStudentEnrollment(student, data)).map((student) => student.id));
+    const visibleGroups = archivedTeacher ? [] : activeGroups(data).filter((group) => (profile.role !== "teacher" || normalise(group.tc) === normalise(profile.teacherName))
+      && (!group.p || !liveStudents.some((student) => student.g === group.id) || liveStudents.some((student) => student.g === group.id && activeIds.has(student.id) && !listedIds.has(student.id))));
+    const visibleIds = new Set(visibleGroups.map((group) => group.id));
+    const formerStudents = profile.role === "teacher" ? [] : formerCustomerRows(data).filter((student) => !hasActiveStudentEnrollment(student, data));
+    const formerStudentIds = new Set(formerStudents.map((student) => student.id));
+    const searchableStudents = archivedTeacher ? [] : liveStudents.filter((student) => {
+      if (formerStudentIds.has(student.id)) return true;
+      return visibleIds.has(student.g) && activeIds.has(student.id) && !listedIds.has(student.id);
+    });
+    const leadPool = profile.role === "teacher" ? [] : uniqueLeads(live(data.l)).filter((lead) => !formerStudents.some((student) => samePerson(student, lead)));
+    return { archivedTeacher, visibleGroups, formerStudents, searchableStudents, leadPool };
+  }, [data, profile.role, profile.teacherName]);
+  const { archivedTeacher, visibleGroups, searchableStudents, leadPool } = base;
   const rounds = profile.role === "teacher" ? [] : live(data.r);
   const teachers = profile.role === "teacher" ? [] : teacherNames(data);
   const sources = STUDENT_SOURCES;
@@ -2650,10 +2665,8 @@ function SearchOverlay({ data, profile, onClose, onGroup, onStudent, onLead }: {
     && (!kindFilter || kindFilter === "group" && !group.p || kindFilter === "private" && Boolean(group.p))
     && acceptsRosterFilters(group));
   const groups = eligibleGroups.filter((group) => !group.p && matchesText(`${displayGroupLabel(group, data)} ${teacherDisplayName(data, group.tc)}`)).slice(0, 15);
-  const students = !archivedTeacher ? live(data.m).filter((student) => {
+  const students = !archivedTeacher ? searchableStudents.filter((student) => {
     const group = data.g.find((item) => item.id === student.g);
-    if ((!group || !visibleIds.has(student.g)) && !formerStudentIds.has(student.id)) return false;
-    if (!formerStudentIds.has(student.id) && (!isActiveStudentEnrollment(student, data) || isListedInFormerCustomers(student, data))) return false;
     return (!roundFilter || group?.r === roundFilter)
       && (!teacherFilter || Boolean(group && normalise(group.tc) === normalise(teacherFilter)))
       && (!kindFilter || kindFilter === "student" || kindFilter === (group?.p || student.enrollmentType === "private" ? "private" : "group"))
@@ -2665,8 +2678,7 @@ function SearchOverlay({ data, profile, onClose, onGroup, onStudent, onLead }: {
   }).slice(0, 15) : [];
   const canShowLeads = profile.role !== "teacher" && (!kindFilter || kindFilter === "lead")
     && !classificationFilter && !roundFilter && !teacherFilter && !paymentFilter && !renewalFilter;
-  const leads = canShowLeads ? uniqueLeads(live(data.l)).filter((lead) => (!sourceFilter || lead.source === sourceFilter)
-    && !formerStudents.some((student) => samePerson(student, lead))
+  const leads = canShowLeads ? leadPool.filter((lead) => (!sourceFilter || lead.source === sourceFilter)
     && (matchesPersonText(lead.n ?? "", lead.ph ?? "", `${lead.source ?? ""} ${lead.sourceOther ?? ""} ${lead.followupReason ?? ""}`) || matchesStudentCode(studentCodeFor(lead), text))).slice(0, 15) : [];
   const activeFilters = Boolean(text || kindFilter || classificationFilter || roundFilter || sourceFilter || teacherFilter || paymentFilter || renewalFilter);
   const studentPaymentLabel = (student: Student) => student.pay === 2 ? "دفع جزئي" : student.pay === 1 ? "مدفوع" : "غير مدفوع";
