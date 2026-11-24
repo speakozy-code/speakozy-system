@@ -101,3 +101,13 @@ export function findLiveDuplicates(data: AcademyData): LiveDuplicate[] {
   });
   return out;
 }
+
+/**
+ * An ended Private whose student has no other place (no live lead, no former-customer copy,
+ * no running enrollment). Such a record must stay visible in the Private tab instead of vanishing.
+ */
+export function endedPrivateWithoutPlace(groupId: string, data: AcademyData): boolean {
+  const group = data.g.find((item) => item.id === groupId);
+  if (!group || group.x || !group.p) return false;
+  return live(data.m).some((student) => student.g === groupId && !student.movedToTab && !isActiveStudentEnrollment(student, data) && customerStage(student, data) === "none");
+}

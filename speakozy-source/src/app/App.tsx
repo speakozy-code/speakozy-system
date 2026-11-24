@@ -10,7 +10,7 @@ import { canAccessFinance, canAccessMarketingAnalytics, isMarketingRole } from "
 import { activeAttendanceRecords, activeGroups, activeStudentsOf, archiveTeacher, attendanceFor, canAddStudentToGroup, canAssignTeacher, colourForGroup, copyStudentForGroup, currentStudentCounts, expenseForMonth, formerStudents, formatDate, formatTime, groupDays, groupLabel, groupTime, incomeForMonth, incomeStudentsByKindForMonth, incomeStudentsForMonth, isEnrolledStudent, isRoundActive, isStudentCodeQuery, isTeacherArchived, isTeacherDeleted, isTeacherNameArchived, isTerminalLead, leadBucket, leadCategory, leadFollowupDate, LEAD_FOLLOWUP_OPTIONS, LEVEL_COUNTS, LEVELS, live, matchesStudentCode, monthKey, nonArchivedGroups, normalise, parseIsoDate, privateGroupCanAccept, removeStudentAttendance, restoreTeacher, roundName, safeCopy, saveTeacherWeeklyHours, sortLeads, studentKind, studentKindLabel, studentSourceLabel, STUDENT_SOURCES, studentsInNonArchivedGroups, studentsInRound, studentsOf, teacherNames, toIsoDate, uid, uniquePhoneNumbers, WEEKDAYS } from "../domain/utils";
 import { allTeacherScheduleConflicts, cancelSession, durationHours, ensureEightActiveSessions, feedbackSessionsDue, generateSessions, monthTeacherHours, plannedGroupEndDate, rescheduleGroupPreservingAttendance, rescheduleSession, restoreSession, scheduledSessionsOnDate, sessionsOf, teacherScheduleConflicts, teacherSessionsForMonth, weeklyScheduledHours } from "../domain/schedule";
 import { isGroupOperationalToday } from "../domain/lifecycle";
-import { hasActiveStudentEnrollment, isActiveStudentEnrollment, personPhone, samePerson, sameStudentIdentity, studentCodeFor, type PersonRecord } from "../domain/customer-stage";
+import { endedPrivateWithoutPlace, hasActiveStudentEnrollment, isActiveStudentEnrollment, personPhone, samePerson, sameStudentIdentity, studentCodeFor, type PersonRecord } from "../domain/customer-stage";
 import { retentionByMonth } from "../domain/retention";
 import { dataQualityIssues } from "../domain/data-quality";
 import { applyDuplicateCleanup, cleanupBatches, planDuplicateCleanup, REASON_LABELS, undoDuplicateCleanup } from "../domain/duplicate-cleanup";
@@ -905,7 +905,7 @@ function GroupsView({ data, profile, teacherAccounts, isPrivate, selectedGroup, 
     if (profile.role !== "teacher" && Boolean(group.p) !== isPrivate) return false;
     if (isPrivate) {
       const students = live(data.m).filter((student) => student.g === group.id);
-      if (students.length && students.every((student) => !isActiveStudentEnrollment(student, data) || isListedInFormerCustomers(student, data))) return false;
+      if (students.length && students.every((student) => !isActiveStudentEnrollment(student, data) || isListedInFormerCustomers(student, data)) && !endedPrivateWithoutPlace(group.id, data)) return false;
     }
     if (profile.role === "teacher") {
       if (!group.p && !isRoundActive(data, group.r)) return false;
@@ -915,7 +915,7 @@ function GroupsView({ data, profile, teacherAccounts, isPrivate, selectedGroup, 
       if (selectedRoundFilter && group.r !== selectedRoundFilter) return false;
     }
     return true;
-  }).sort((a, b) => groupLabel(a).localeCompare(groupLabel(b), "ar"));
+  }).sort((a, b) => (isPrivate ? Number(!isGroupOperationalToday(a)) - Number(!isGroupOperationalToday(b)) : 0) || groupLabel(a).localeCompare(groupLabel(b), "ar"));
   const canEdit = profile.role !== "teacher";
   const privateAddAction = isPrivate ? <button className="btn btn--icon private-add-icon" title="إضافة Private" aria-label="إضافة Private" onClick={() => setAddMode(true)}><Plus size={19} /></button> : <button className="btn" onClick={() => setAddMode((open) => !open)}><Plus size={16} />إضافة جروب</button>;
   return <><PageHead title={isPrivate ? "البرايفت" : profile.role === "teacher" ? "جروباتي" : "المجموعات والراوندات"} description={profile.role === "teacher" ? "جروباتك والطلاب الخاصون المسندون إليك، مع بيانات كل طالب مباشرة." : isPrivate ? "كل Private جروب لطالب واحد؛ الاسم والمستوى والهاتف وبيانات الموعد ظاهرة مباشرة، والجلسات والحضور في التبويب المخصص." : "جروبات الراوند المحدد، الطلاب، المواعيد والمدفوعات."} actions={canEdit ? privateAddAction : undefined} />
@@ -1532,7 +1532,10 @@ function PrivateStudentEntry({ group, data, profile, teacherAccounts, toneOffset
     if (!window.confirm(`أرشفة جروب Private «${studentName || group.lv || "بدون اسم"}»؟ ستظل البيانات قابلة للاستعادة.`)) return;
     commit((draft) => { const target = draft.g.find((item) => item.id === group.id); if (target) { target.x = 1; target.xa = Date.now(); } }, "تمت أرشفة جروب Private.");
   };
+  const endedOn = plannedGroupEndDate(group);
+  const ended = !isGroupOperationalToday(group);
   return <div id={`group-record-${group.id}`} className="private-student-list">
+    {ended && <div className="notice notice--warning">انتهى اشتراك هذا الـPrivate{endedOn ? ` في ${formatDate(endedOn)}` : ""}. السجل محفوظ هنا ولن يختفي؛ جدّد الاشتراك، أو انقله إلى «عملاء الراوند الجاي» من «إجراءات أخرى»، أو أرشفه.</div>}
     {roster.length > 1 && <div className="notice notice--warning">هذا سجل Private قديم مرتبط بأكثر من طالب؛ لم ننقل أو نحذف أي طالب تلقائيًا.</div>}
     {visibleRoster.length > 0 && <div className="private-student-item">
       {visibleRoster.map((student, index) => <StudentRow key={student.id} student={student} index={index} toneIndex={toneOffset + index} canEditPayment={profile.role === "owner"} canEditRenewal={profile.role !== "teacher"} commit={commit} data={data} showLevelCount groupSummary={group} />)}
