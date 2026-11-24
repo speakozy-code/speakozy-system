@@ -13,6 +13,7 @@ import { isGroupOperationalToday } from "../domain/lifecycle";
 import { hasActiveStudentEnrollment, isActiveStudentEnrollment, personPhone, samePerson, sameStudentIdentity, studentCodeFor, type PersonRecord } from "../domain/customer-stage";
 import { retentionByMonth } from "../domain/retention";
 import { dataQualityIssues } from "../domain/data-quality";
+import { applyDuplicateCleanup, cleanupBatches, planDuplicateCleanup, REASON_LABELS, undoDuplicateCleanup } from "../domain/duplicate-cleanup";
 import { AUTOMATIC_LEAD_FOLLOWUP_INTERVAL_MS, AUTOMATIC_STUDENT_FOLLOWUP_INTERVAL_MS, isAutomaticFollowupDue } from "../domain/followup";
 import type { CloudBackup } from "../services/cloudRepository";
 
@@ -738,7 +739,7 @@ function HomeView({ data, profile, onTab, onOpenGroup, onOpenNotice, commit }: {
       <div className="entity-card__meta">{roundSources.size ? [...roundSources].map(([source, count]) => <span className="tag tag--muted" key={source}>{source}: {count}</span>) : <span className="tag tag--muted">لا توجد بيانات مصادر في هذه الراوند</span>}</div>
     </section>}
     {profile.role !== "teacher" && <><SmartRenewalPanel data={data} notices={dueNotices} onTab={onTab} onOpenGroup={onOpenGroup} onOpenNotice={onOpenNotice} /><LeadFollowupPanel data={data} onTab={onTab} /><GroupOccupancyPanel data={data} onTab={onTab} /></>}
-    {(profile.role === "owner" || profile.role === "admin") && <><DataQualityPanel data={data} onTab={onTab} onOpenGroup={onOpenGroup} /><TeacherConflictsPanel data={data} onOpenGroup={onOpenGroup} /></>}
+    {(profile.role === "owner" || profile.role === "admin") && <><DataQualityPanel data={data} onTab={onTab} onOpenGroup={onOpenGroup} commit={commit} /><TeacherConflictsPanel data={data} onOpenGroup={onOpenGroup} /></>}
     {profile.role !== "teacher" && <section className="section"><div className="section-head"><div><h2>الراوندات النشطة</h2><p>عدد الطلاب والمتابعات في كل راوند نشط، مع فصل الـPrivate.</p></div><button className="btn btn--ghost btn--small" onClick={() => onTab("groups")}>إدارة الجروبات</button></div><div className="round-card-list">{rounds.map((round) => { const roundGroups = groups.filter((group) => !group.p && group.r === round.id); const groupIds = new Set(roundGroups.map((group) => group.id)); const roundStudents = live(data.m).filter((student) => isEnrolledStudent(student) && groupIds.has(student.g)); const decided = roundStudents.filter((student) => student.ren === 1 || student.ren === 2).length; return <button className="round-card" key={round.id} onClick={() => onTab("groups")}><div className="round-card__top"><strong>{roundName(round)}</strong><span className="tag">{roundGroups.length} جروب</span></div><div className="round-card__stats"><span><b>{roundStudents.length}</b> طالب</span><span><b>{roundStudents.filter((student) => student.ren === 1).length}</b> هيجددوا</span><span><b>{roundStudents.filter((student) => student.ren === 2).length}</b> مش هيجددوا</span></div><div className="progress-track"><span style={{ width: roundStudents.length ? `${Math.round(decided / roundStudents.length * 100)}%` : "0%" }} /></div></button>; })}{!rounds.length && <div className="empty">لا توجد راوندات نشطة.</div>}</div></section>}
     <div className="split"><section className="section"><div className="section-head"><div><h2>إجراءات سريعة</h2><p>افتح الصفحات الأكثر استخدامًا.</p></div></div><div className="card-list"><QuickAction icon={UsersRound} title="إدارة الجروبات والطلاب" description="أضف جروبًا أو طالبًا، وراجع المواعيد والمدفوعات." onClick={() => onTab("groups")} /><QuickAction icon={ListChecks} title="الحضور والغياب" description="اختر الجروب وسجّل حاضرًا أو غائبًا أو اترك الخانة بلا علامة." onClick={() => onTab("attendance")} /><QuickAction icon={GraduationCap} title="تصنيفات الليدز" description="تابع العملاء وتحديد المستوى من قائمة الليدز." onClick={() => onTab("leads")} /></div></section>
       <section className="section"><div className="section-head"><div><h2>ملخص اليوم</h2><p>{formatDate(toIsoDate(), true)}</p></div><button className="btn btn--ghost btn--small" onClick={() => onTab("report")}>التقرير اليومي</button></div><TodaySummary data={data} profile={profile} onTab={onTab} /></section></div>
@@ -757,12 +758,33 @@ function SmartRenewalPanel({ data, notices, onTab, onOpenGroup, onOpenNotice }: 
     return <div className="entity-card" key={notice.id}><div className="entity-card__top"><div><h3>{notice.title}</h3><p>{notice.description}{student?.ren === 2 ? ` · السبب: ${student.renewalReason?.trim() || "لم يُسجل السبب"}` : ""}</p></div><span className={`tag ${warning ? "tag--warning" : "tag--muted"}`}>{label}</span></div><div className="entity-card__actions">{phone && <><a className="btn btn--ghost btn--small" href={`tel:${phone}`}>اتصال سريع</a><button className="btn btn--ghost btn--small" onClick={() => safeCopy(notice.phone ?? "")}>نسخ الرقم</button></>}{(notice.studentId || notice.leadId) && <button className="btn btn--ghost btn--small" onClick={() => onOpenNotice(notice)}>افتح الشخص</button>}{group && <button className="btn btn--small" onClick={() => onOpenGroup(group)}>{notice.kind === "feedback" ? "افتح الجروب" : "اعرض الجروب"}</button>}</div></div>;
   })}</div> : <div className="empty">لا توجد تنبيهات تشغيلية مستحقة الآن.</div>}</section>;
 }
-function DataQualityPanel({ data, onTab, onOpenGroup }: { data: AcademyData; onTab: (tab: Tab) => void; onOpenGroup: (group: AcademyGroup) => void }) {
+function DuplicateCleanup({ data, commit }: { data: AcademyData; commit: Commit }) {
+  const [open, setOpen] = useState(false);
+  const plan = useMemo(() => planDuplicateCleanup(data), [data]);
+  const batches = useMemo(() => cleanupBatches(data), [data]);
+  if (!plan.actions.length && !plan.needsDecision.length && !batches.length) return null;
+  const run = () => {
+    let archived = 0;
+    commit((draft) => { archived = applyDuplicateCleanup(draft, planDuplicateCleanup(draft)).archived; }, "تمت أرشفة السجلات المكررة.");
+    setOpen(false);
+    return archived;
+  };
+  return <div className="entity-card" style={{ marginBottom: 12 }}>
+    <div className="entity-card__top"><div><h3>تنضيف التكرارات</h3><p>{plan.actions.length ? `${plan.actions.length} سجل مكرر جاهز للأرشفة` : "لا توجد سجلات مكررة جاهزة للأرشفة."}{plan.needsDecision.length ? ` · ${plan.needsDecision.length} تحتاج قرارك (عليها متابعة)` : ""}. الأرشفة لا تحذف شيئًا ويمكن التراجع عنها.</p></div>
+      {plan.actions.length > 0 && <button className="btn btn--small" onClick={() => setOpen(true)}>مراجعة وتنضيف</button>}</div>
+    {batches.slice(0, 3).map((batch) => <div className="entity-card__actions" key={batch.tag}><span className="tag tag--muted">آخر تنضيف: {batch.count} سجل · {formatDate(new Date(batch.at).toISOString().slice(0, 10))}</span><button className="btn btn--ghost btn--small" onClick={() => { if (window.confirm(`التراجع عن تنضيف ${batch.count} سجل؟`)) commit((draft) => { undoDuplicateCleanup(draft, batch.tag); }, "تم التراجع عن التنضيف."); }}>تراجع</button></div>)}
+    {open && <Overlay onClose={() => setOpen(false)}><section className="section"><div className="section-head"><div><h2>سيتم أرشفة {plan.actions.length} سجل</h2><p>راجع القائمة ثم أكد. لن يُحذف شيء.</p></div><button className="btn btn--ghost btn--icon" onClick={() => setOpen(false)}><X size={17} /></button></div>
+      <div className="card-list" style={{ maxHeight: "55vh", overflow: "auto" }}>{plan.actions.map((action) => <div className="entity-card" key={action.id}><h3>{action.name}</h3><p><bdi dir="ltr">{action.phone || "بدون رقم"}</bdi> · {action.record === "lead" ? "ليد" : "طالب (نسخة)"} · {REASON_LABELS[action.reason]}</p></div>)}</div>
+      <div className="entity-card__actions"><button className="btn" onClick={run}>تأكيد الأرشفة ({plan.actions.length})</button><button className="btn btn--ghost" onClick={() => setOpen(false)}>إلغاء</button></div></section></Overlay>}
+  </div>;
+}
+
+function DataQualityPanel({ data, onTab, onOpenGroup, commit }: { data: AcademyData; onTab: (tab: Tab) => void; onOpenGroup: (group: AcademyGroup) => void; commit: Commit }) {
   const issues = useMemo(() => dataQualityIssues(data), [data]);
   const labels: Record<string, string> = { "live-duplicate": "تكرار حي", "duplicate-phone": "أرقام مكررة", "student-details": "بيانات طالب ناقصة", "missing-group": "طلاب بلا جروب", "group-setup": "إعداد جروب ناقص", source: "مصدر غير محدد" };
   const counts = [...new Set(issues.map((issue) => issue.kind))].map((kind) => ({ kind, count: issues.filter((issue) => issue.kind === kind).length }));
   return <section className="section"><div className="section-head"><div><h2>مراجعة جودة البيانات</h2><p>كشف السجلات التي تحتاج استكمالًا أو مراجعة؛ لا يتم تعديل أي بيانات تلقائيًا.</p></div><span className={`tag ${issues.length ? "tag--warning" : "tag--muted"}`}>{issues.length} ملاحظة</span></div>
-    {issues.length ? <><div className="quality-summary">{counts.map((item) => <span className="tag tag--muted" key={item.kind}>{labels[item.kind] || item.kind}: {item.count}</span>)}</div><div className="card-list quality-issues">{issues.slice(0, 8).map((issue) => <div className="entity-card" key={issue.id}><div className="entity-card__top"><div><h3>{issue.title}</h3><p>{issue.detail}</p></div><span className="tag tag--warning">{labels[issue.kind] || "مراجعة"}</span></div><div className="entity-card__actions"><button className="btn btn--ghost btn--small" onClick={() => { const group = issue.groupId ? data.g.find((item) => item.id === issue.groupId) : undefined; if (group) onOpenGroup(group); else onTab("groups"); }}>مراجعة السجل</button></div></div>)}</div>{issues.length > 8 && <p className="quality-more">يعرض أول 8 ملاحظات من أصل {issues.length}.</p>}</> : <div className="empty">لم تظهر مشكلات بيانات تحتاج مراجعة.</div>}
+    <DuplicateCleanup data={data} commit={commit} />{issues.length ? <><div className="quality-summary">{counts.map((item) => <span className="tag tag--muted" key={item.kind}>{labels[item.kind] || item.kind}: {item.count}</span>)}</div><div className="card-list quality-issues">{issues.slice(0, 8).map((issue) => <div className="entity-card" key={issue.id}><div className="entity-card__top"><div><h3>{issue.title}</h3><p>{issue.detail}</p></div><span className="tag tag--warning">{labels[issue.kind] || "مراجعة"}</span></div><div className="entity-card__actions"><button className="btn btn--ghost btn--small" onClick={() => { const group = issue.groupId ? data.g.find((item) => item.id === issue.groupId) : undefined; if (group) onOpenGroup(group); else onTab("groups"); }}>مراجعة السجل</button></div></div>)}</div>{issues.length > 8 && <p className="quality-more">يعرض أول 8 ملاحظات من أصل {issues.length}.</p>}</> : <div className="empty">لم تظهر مشكلات بيانات تحتاج مراجعة.</div>}
   </section>;
 }
 function TeacherConflictsPanel({ data, onOpenGroup }: { data: AcademyData; onOpenGroup: (group: AcademyGroup) => void }) {
@@ -1690,15 +1712,19 @@ function LeadsView({ data, bucket, commit }: { data: AcademyData; bucket: "next"
   const matchesCustomerQuery = (name: string, phone: string, extra = "", code = "") => `${name} ${phone} ${extra}`.toLocaleLowerCase().includes(query.toLocaleLowerCase())
     || Boolean(!isStudentCodeQuery(query) && queryDigits && personPhone(phone).includes(queryDigits))
     || matchesStudentCode(code, query);
-  const formerCustomers = formerCustomerRows(data).filter((student) => !hasActiveStudentEnrollment(student, data));
+  const { formerCustomers, leadPool } = useMemo(() => {
+    const former = formerCustomerRows(data).filter((student) => !hasActiveStudentEnrollment(student, data));
+    const pool = uniqueLeads(live(data.l).filter((lead) => !lead.convertedStudentId && !leadHasStudentRecord(lead, data)))
+      .filter((lead) => !former.some((student) => samePerson(student, lead)));
+    return { formerCustomers: former, leadPool: pool };
+  }, [data]);
   const formerRows = bucket === "next" ? formerCustomers : [];
   const visibleFormerRows = formerRows
     .filter((student) => !statusFilter || leadFollowupValue(student) === statusFilter)
     .filter((student) => !sourceFilter || student.source === sourceFilter)
     .filter((student) => matchesCustomerQuery(student.n ?? "", student.ph ?? "", `${student.source ?? ""} ${student.sourceOther ?? ""}`, studentCodeFor(student)));
-  const leads = sortLeads(uniqueLeads(live(data.l).filter((lead) => !lead.convertedStudentId && !leadHasStudentRecord(lead, data)))
+  const leads = sortLeads(leadPool
     .filter((lead) => leadBucket(lead) === bucket)
-    .filter((lead) => !formerCustomers.some((student) => samePerson(student, lead)))
     .filter((lead) => !statusFilter || lead.followupCat === statusFilter)
     .filter((lead) => !sourceFilter || lead.source === sourceFilter)
     .filter((lead) => matchesCustomerQuery(lead.n ?? "", lead.ph ?? "", `${lead.lv ?? ""} ${lead.nt ?? ""} ${lead.followupReason ?? ""} ${lead.source ?? ""} ${lead.sourceOther ?? ""}`, studentCodeFor(lead))));
