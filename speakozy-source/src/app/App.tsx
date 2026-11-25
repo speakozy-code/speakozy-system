@@ -9,6 +9,7 @@ import type { AcademyData, AcademyGroup, AppNotice, AttendanceStatus, Lead, Prof
 import { canAccessFinance, canAccessMarketingAnalytics, isMarketingRole } from "../domain/permissions";
 import { activeAttendanceRecords, activeGroups, activeStudentsOf, archiveTeacher, attendanceFor, canAddStudentToGroup, canAssignTeacher, colourForGroup, copyStudentForGroup, currentStudentCounts, expenseForMonth, formerStudents, formatDate, formatTime, groupDays, groupLabel, groupTime, incomeForMonth, incomeStudentsByKindForMonth, incomeStudentsForMonth, isEnrolledStudent, isRoundActive, isStudentCodeQuery, isTeacherArchived, isTeacherDeleted, isTeacherNameArchived, isTerminalLead, leadBucket, leadCategory, leadFollowupDate, LEAD_FOLLOWUP_OPTIONS, LEVEL_COUNTS, LEVELS, live, matchesStudentCode, monthKey, nonArchivedGroups, normalise, parseIsoDate, privateGroupCanAccept, removeStudentAttendance, restoreTeacher, roundName, safeCopy, saveTeacherWeeklyHours, sortLeads, studentKind, studentKindLabel, studentSourceLabel, STUDENT_SOURCES, studentsInNonArchivedGroups, studentsInRound, studentsOf, teacherNames, toIsoDate, uid, uniquePhoneNumbers, WEEKDAYS } from "../domain/utils";
 import { allTeacherScheduleConflicts, cancelSession, durationHours, ensureEightActiveSessions, feedbackSessionsDue, generateSessions, monthTeacherHours, plannedGroupEndDate, rescheduleGroupPreservingAttendance, rescheduleSession, restoreSession, scheduledSessionsOnDate, sessionsOf, teacherScheduleConflicts, teacherSessionsForMonth, weeklyScheduledHours } from "../domain/schedule";
+import { minutesToTime, teacherWeek } from "../domain/teacher-availability";
 import { isGroupOperationalToday } from "../domain/lifecycle";
 import { studentJourney } from "../domain/student-journey";
 import { endedPrivateWithoutPlace, hasActiveStudentEnrollment, isActiveStudentEnrollment, personPhone, samePerson, sameStudentIdentity, studentCodeFor, type PersonRecord } from "../domain/customer-stage";
@@ -981,6 +982,25 @@ function RoundControl({ data, commit }: { data: AcademyData; commit: Commit }) {
   </section>;
 }
 
+function clockLabel(minutes: number) { return minutes >= 1440 ? "12:00 ص" : formatTime(minutesToTime(minutes)); }
+
+function TeacherFreeTime({ data, teacher, onPick, ignoreGroupId }: { data: AcademyData; teacher: string; onPick?: (day: number, from: number, to: number) => void; ignoreGroupId?: string }) {
+  const week = useMemo(() => teacherWeek(data, teacher, toIsoDate(), ignoreGroupId), [data, teacher, ignoreGroupId]);
+  return <div className="field span-2 teacher-free">
+    <label>مواعيد {teacher} الفاضية (من 5 مساءً لـ12 بالليل)</label>
+    <div className="teacher-free__grid">{week.map((day) => <div className="teacher-free__day" key={day.day}>
+      <strong>{day.name}</strong>
+      <div className="teacher-free__ranges">
+        {day.free.length ? day.free.map((range) => onPick
+          ? <button type="button" className="teacher-free__chip" key={range.from} onClick={() => onPick(day.day, range.from, range.to)} title="اضغط لتعبئة الموعد">{clockLabel(range.from)} – {clockLabel(range.to)}</button>
+          : <span className="teacher-free__chip" key={range.from}>{clockLabel(range.from)} – {clockLabel(range.to)}</span>) : <span className="tag tag--danger">مشغول</span>}
+      </div>
+      {day.busy.length > 0 && <small dir="rtl">مشغول: {day.busy.map((block) => `${block.label} ${clockLabel(block.from)}–${clockLabel(block.to)}`).join("، ")}</small>}
+    </div>)}</div>
+    {onPick && <small>اضغط على أي فترة فاضية وهتتعبّى «من/إلى» والأيام تلقائيًا، وتقدر تعدّل بعدها.</small>}
+  </div>;
+}
+
 function GroupForm({ data, profile, teacherAccounts, isPrivate, onCancel, commit }: { data: AcademyData; profile: Profile; teacherAccounts: TeacherAccount[]; isPrivate: boolean; onCancel: () => void; commit: Commit }) {
   const [name, setName] = useState("");
   const [lookup, setLookup] = useState("");
@@ -1063,6 +1083,7 @@ function GroupForm({ data, profile, teacherAccounts, isPrivate, onCancel, commit
       {isPrivate && <><div className="field"><label>هاتف الطالب</label><input dir="ltr" value={studentPhone} onChange={(event) => setStudentPhone(event.target.value)} required /><small>رقم واحد للطالب صاحب هذا الجروب.</small></div><div className="field"><label>مستوى الطالب</label><select value={studentLevel} onChange={(event) => setStudentLevel(event.target.value)} required><option value="">اختر المستوى</option>{LEVELS.map((item) => <option key={item}>{item}</option>)}</select></div><div className="field"><label>تصنيف الطالب</label><select value={studentKind} onChange={(event) => setStudentKind(event.target.value as StudentKind)}><option value="new">جديد</option><option value="old">قديم</option><option value="returned">قديم رجع بعد انقطاع</option></select></div><div className="field"><label>مصدر الطالب</label><select value={studentSource} onChange={(event) => setStudentSource(event.target.value)}><option value="">اختر المصدر</option>{STUDENT_SOURCES.map((source) => <option key={source} value={source}>{source}</option>)}</select></div>{studentSource === "أخرى" && <div className="field"><label>وصف المصدر</label><input value={studentSourceOther} onChange={(event) => setStudentSourceOther(event.target.value)} /></div>}{profile.role === "owner" && <div className="field"><label>عدد الليفلات المدفوعة للطالب</label><select value={studentLevelCount} onChange={(event) => setStudentLevelCount(event.target.value)}>{LEVEL_COUNTS.map((count) => <option key={count} value={count}>{count} ليفل مدفوع</option>)}</select></div>}</>}
       <div className="field"><label>الأيام</label><select value={days} onChange={(event) => setDays(event.target.value)} required={isPrivate}><option>السبت والثلاثاء</option><option>الأحد والأربعاء</option><option>الاثنين والخميس</option></select></div>
       <div className="field"><label>المدرس</label><select value={teacher} onChange={(event) => { setTeacher(event.target.value); setFormError(""); }} required><option value="">{teachers.length ? "اختر المدرس" : "أضف مدرسًا أولًا من ساعات المدرسين"}</option>{teachers.map((item) => <option key={item} value={item}>{item}</option>)}</select></div>
+      {teacher && <TeacherFreeTime data={data} teacher={teacher} onPick={(day, from, to) => { setStart(minutesToTime(from)); setEnd(minutesToTime(to)); const pair = ["السبت والثلاثاء", "الأحد والأربعاء", "الاثنين والخميس"].find((option) => groupDays({ d: option } as AcademyGroup).includes(day)); if (pair) setDays(pair); setFormError(""); }} />}
       {!isPrivate && <><div className="field"><label>الراوند</label><select value={round} onChange={(event) => setRound(event.target.value)}>{live(data.r).filter((item) => !item.pl).map((item) => <option key={item.id} value={item.id}>{roundName(item)}</option>)}</select></div><div className="field"><label>سعة الجروب (اختياري)</label><input type="number" min="1" max="100" value={capacity} onChange={(event) => setCapacity(event.target.value)} placeholder="بدون حد محدد" /></div></>}
       <div className="field"><label>من</label><input type="time" value={start} onChange={(event) => setStart(event.target.value)} required={isPrivate} /></div>
       <div className="field"><label>إلى</label><input type="time" value={end} onChange={(event) => setEnd(event.target.value)} required={isPrivate} /></div>
@@ -1198,6 +1219,7 @@ function EditableGroup({ group, student, data, teacherAccounts, commit, onClose 
     {!group.p && <div className="field"><label>مستوى الجروب</label><select value={draft.lv} onChange={(event) => setDraft({ ...draft, lv: event.target.value })}><option value="">اختر المستوى</option>{legacyLevel && <option value={draft.lv}>{draft.lv} · مستوى سابق</option>}{LEVELS.map((level) => <option key={level} value={level}>{level}</option>)}</select></div>}
     <div className="field"><label>الأيام</label><select value={draft.d} onChange={(event) => setDraft({ ...draft, d: event.target.value })}><option>السبت والثلاثاء</option><option>الأحد والأربعاء</option><option>الاثنين والخميس</option></select></div>
     <div className="field"><label>المدرس</label><select value={draft.tc} onChange={(event) => setDraft({ ...draft, tc: event.target.value })}><option value="">اختر المدرس</option>{legacyTeacher && <option value={draft.tc}>{isTeacherNameArchived(data, draft.tc) ? "مدرس مؤرشف · التكليف الحالي محفوظ" : `${draft.tc} · مدرس قديم`}</option>}{teachers.map((name) => <option key={name} value={name}>{name}</option>)}</select>{legacyTeacher && <small>الاسم الحالي محفوظ للسجل؛ اختر مدرسًا نشطًا لأي تعيين جديد.</small>}</div>
+    {draft.tc && <TeacherFreeTime data={data} teacher={draft.tc} ignoreGroupId={group.id} onPick={(day, from, to) => setDraft((current) => { const pair = ["السبت والثلاثاء", "الأحد والأربعاء", "الاثنين والخميس"].find((option) => groupDays({ d: option } as AcademyGroup).includes(day)); return { ...current, t1: minutesToTime(from), t2: minutesToTime(to), ...(pair ? { d: pair } : {}) }; })} />}
     <div className="field"><label>من الساعة</label><input type="time" value={draft.t1} onChange={(event) => setDraft({ ...draft, t1: event.target.value })} /></div>
     <div className="field"><label>إلى الساعة</label><input type="time" value={draft.t2} onChange={(event) => setDraft({ ...draft, t2: event.target.value })} /></div>
     <div className="field"><label>تاريخ البداية</label><input type="date" value={draft.s} onChange={(event) => setDraft({ ...draft, s: event.target.value })} /></div>
