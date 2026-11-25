@@ -21,6 +21,7 @@ const modules = [
   ["src/domain/retention.ts", "domain/retention.js"],
   ["src/domain/customer-stage.ts", "domain/customer-stage.js"],
   ["src/domain/student-journey.ts", "domain/student-journey.js"],
+  ["src/domain/teacher-availability.ts", "domain/teacher-availability.js"],
   ["src/domain/duplicate-cleanup.ts", "domain/duplicate-cleanup.js"],
   ["src/domain/automatic-former-copies.ts", "domain/automatic-former-copies.js"],
   ["src/domain/data-quality.ts", "domain/data-quality.js"],
@@ -51,6 +52,7 @@ try {
   const { retentionByMonth } = require(join(tempRoot, "domain/retention.js"));
   const { planDuplicateCleanup, applyDuplicateCleanup, undoDuplicateCleanup, cleanupBatches } = require(join(tempRoot, "domain/duplicate-cleanup.js"));
   const { studentJourney } = require(join(tempRoot, "domain/student-journey.js"));
+  const { teacherWeek } = require(join(tempRoot, "domain/teacher-availability.js"));
   const { customerStage, findLiveDuplicates, hasActiveStudentEnrollment, endedPrivateWithoutPlace } = require(join(tempRoot, "domain/customer-stage.js"));
   const { addAutomaticFormerCustomerCopies } = require(join(tempRoot, "domain/automatic-former-copies.js"));
   const { previewData } = require(join(tempRoot, "domain/demo.js"));
@@ -557,6 +559,18 @@ try {
   assert.equal(journey.moves.length, 1, "journey lists the automatic former-customer copy as a move");
   assert.equal(journey.leads.length, 1, "journey lists the lead record");
   assert.equal(journey.stage, "group", "journey stage follows the live enrollment");
+  const availData = { m: [], l: [], r: [{ id: "av-r", n: "r" }], g: [
+    { id: "av1", r: "av-r", p: 0, lv: "E1", d: "السبت والثلاثاء", tc: "Mona", t1: "18:00", t2: "20:00", s: "2026-11-01", e: "2026-12-30" },
+    { id: "av2", r: "av-r", p: 1, lv: "Sara", d: "الثلاثاء", tc: "mona", t1: "21:00", t2: "22:00", s: "2026-11-01", e: "2026-12-30" },
+    { id: "av3", r: "av-r", p: 0, lv: "E2", d: "السبت", tc: "Mona", t1: "18:00", t2: "20:00", s: "2026-01-01", e: "2026-02-01" },
+    { id: "av4", r: "av-r", p: 0, lv: "E3", d: "الاحد", tc: "Other", t1: "17:00", t2: "23:00", s: "2026-11-01", e: "2026-12-30" }
+  ] };
+  const week = teacherWeek(availData, "Mona", "2026-11-25");
+  const hours = (range) => `${range.from / 60}-${range.to / 60}`;
+  assert.deepEqual(week.find((d) => d.day === 6).free.map(hours), ["17-18", "20-24"], "free time around a group is listed (finished groups do not block)");
+  assert.deepEqual(week.find((d) => d.day === 2).free.map(hours), ["17-18", "20-21", "22-24"], "private and group on the same day split the free time, name match ignores case");
+  assert.deepEqual(week.find((d) => d.day === 0).free.map(hours), ["17-24"], "another teacher's groups never block this teacher");
+  assert.deepEqual(teacherWeek(availData, "Mona", "2026-11-25", "av1").find((d) => d.day === 6).free.map(hours), ["17-24"], "the group being edited can be ignored");
   const stoppedRoundData = { ...archiveData, r: archiveData.r.map((round) => round.id === "round-active" ? { ...round, on: false } : round) };
   assert.equal(currentStudentCounts(stoppedRoundData).total, 1, "stopping a round removes its group students from current dashboard totals while Private remains active");
   assert.equal(retentionByMonth(stoppedRoundData).flatMap((row) => row.registrations).some((row) => row.student.id === "student-active-group"), true, "stopping a round does not erase its non-archived cohort from retention");
