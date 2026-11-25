@@ -20,6 +20,7 @@ const modules = [
   ["src/domain/demo.ts", "domain/demo.js"],
   ["src/domain/retention.ts", "domain/retention.js"],
   ["src/domain/customer-stage.ts", "domain/customer-stage.js"],
+  ["src/domain/student-journey.ts", "domain/student-journey.js"],
   ["src/domain/duplicate-cleanup.ts", "domain/duplicate-cleanup.js"],
   ["src/domain/automatic-former-copies.ts", "domain/automatic-former-copies.js"],
   ["src/domain/data-quality.ts", "domain/data-quality.js"],
@@ -49,6 +50,7 @@ try {
   const { toIsoDate, privateGroupCanAccept, canAddStudentToGroup, copyStudentForGroup, attendanceKey, attendanceFor, activeAttendanceRecords, activeGroups, archiveTeacher, canAssignTeacher, currentStudentCounts, deleteTeacher, ensureStudentCodes, expenseForMonth, formerStudents, incomeForMonth, incomeStudentsByKindForMonth, incomeStudentsForMonth, isEnrolledStudent, isStudentCodeQuery, isTeacherArchived, isTeacherDeleted, isTeacherNameArchived, LEVELS, LEVEL_COUNTS, matchesStudentCode, normalizeStudentCode, nonArchivedGroups, removeStudentAttendance, restoreTeacher, saveTeacherWeeklyHours, studentKind, studentKindLabel, studentSourceLabel, studentsInNonArchivedGroups, studentsInRound, teacherNames, totalCurrentStudents, uniquePhoneNumbers } = require(join(tempRoot, "domain/utils.js"));
   const { retentionByMonth } = require(join(tempRoot, "domain/retention.js"));
   const { planDuplicateCleanup, applyDuplicateCleanup, undoDuplicateCleanup, cleanupBatches } = require(join(tempRoot, "domain/duplicate-cleanup.js"));
+  const { studentJourney } = require(join(tempRoot, "domain/student-journey.js"));
   const { customerStage, findLiveDuplicates, hasActiveStudentEnrollment, endedPrivateWithoutPlace } = require(join(tempRoot, "domain/customer-stage.js"));
   const { addAutomaticFormerCustomerCopies } = require(join(tempRoot, "domain/automatic-former-copies.js"));
   const { previewData } = require(join(tempRoot, "domain/demo.js"));
@@ -548,6 +550,13 @@ try {
   assert.equal(endedPrivateWithoutPlace("ep-group", { ...endedPrivateData, l: [{ id: "ep-lead", profileId: "ep-profile", n: "Private ended", ph: endedPrivateStudent.ph }] }), false, "once the person is a lead it is listed there, not duplicated in Private");
   assert.equal(endedPrivateWithoutPlace("ep-group", { ...endedPrivateData, m: [endedPrivateStudent, { ...endedPrivateStudent, id: "ep-copy", copiedFromStudentId: "ep-student", movedToTab: "renewals", formerAt: 1 }] }), false, "once copied to former customers it is listed there");
   assert.equal(endedPrivateWithoutPlace("ep-group", { ...endedPrivateData, g: [{ ...endedPrivate, e: "2099-01-01" }] }), false, "a running Private is not an ended record");
+  const journeyData = { ...autoFormerLive, m: [{ ...autoFormerSource, lv: "paid" }, liveSameProfile, { ...autoFormerSource, id: "jr-copy", copiedFromStudentId: autoFormerSource.id, movedToTab: "renewals", formerAt: 123, autoFormerCustomer: true }], l: [{ id: "jr-lead", profileId: autoFormerSource.profileId, n: "j", ph: autoFormerSource.ph, ts: 5 }] };
+  const journey = studentJourney(autoFormerSource, journeyData);
+  assert.deepEqual(journey.enrollments.map((item) => item.status).sort(), ["finished", "running"], "journey lists both the finished and the running enrollment");
+  assert.equal(journey.enrollments[0].level, journey.enrollments[0].group && /^(e\d|pre|inter|int|upper|in\d)/i.test(String(journey.enrollments[0].group.lv)) ? journey.enrollments[0].group.lv : "", "journey never shows junk level values");
+  assert.equal(journey.moves.length, 1, "journey lists the automatic former-customer copy as a move");
+  assert.equal(journey.leads.length, 1, "journey lists the lead record");
+  assert.equal(journey.stage, "group", "journey stage follows the live enrollment");
   const stoppedRoundData = { ...archiveData, r: archiveData.r.map((round) => round.id === "round-active" ? { ...round, on: false } : round) };
   assert.equal(currentStudentCounts(stoppedRoundData).total, 1, "stopping a round removes its group students from current dashboard totals while Private remains active");
   assert.equal(retentionByMonth(stoppedRoundData).flatMap((row) => row.registrations).some((row) => row.student.id === "student-active-group"), true, "stopping a round does not erase its non-archived cohort from retention");
