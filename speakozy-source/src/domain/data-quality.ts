@@ -47,7 +47,7 @@ export function dataQualityIssues(data: AcademyData): DataQualityIssue[] {
     const profiles = new Set(rows.map((student) => String(student.profileId || student.id)));
     if (profiles.size < 2) return;
     const names = [...new Set(rows.map((student) => student.n?.trim()).filter(Boolean))];
-    issues.push({ id: `phone:${phone}`, kind: "duplicate-phone", title: "رقم هاتف مكرر", detail: `${rows[0].ph} · ${names.join("، ") || `${profiles.size} سجلات طلاب`}` });
+    issues.push({ id: `phone:${phone}`, kind: "duplicate-phone", title: "رقم هاتف مكرر", detail: `\u2066${rows[0].ph}\u2069 · ${names.join("، ") || `${profiles.size} سجلات طلاب`}` });
   });
 
   students.forEach((student) => {

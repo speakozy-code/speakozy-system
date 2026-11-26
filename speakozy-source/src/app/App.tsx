@@ -12,7 +12,7 @@ import { allTeacherScheduleConflicts, cancelSession, durationHours, ensureEightA
 import { minutesToTime, teacherWeek } from "../domain/teacher-availability";
 import { isGroupOperationalToday } from "../domain/lifecycle";
 import { studentJourney } from "../domain/student-journey";
-import { endedPrivateWithoutPlace, hasActiveStudentEnrollment, isActiveStudentEnrollment, personPhone, samePerson, sameStudentIdentity, studentCodeFor, type PersonRecord } from "../domain/customer-stage";
+import { endedPrivateWithoutPlace, hasActiveStudentEnrollment, isActiveStudentEnrollment, personPhone, phoneMatches, samePerson, sameStudentIdentity, studentCodeFor, type PersonRecord } from "../domain/customer-stage";
 import { retentionByMonth } from "../domain/retention";
 import { dataQualityIssues } from "../domain/data-quality";
 import { applyDuplicateCleanup, cleanupBatches, planDuplicateCleanup, REASON_LABELS, undoDuplicateCleanup } from "../domain/duplicate-cleanup";
@@ -515,7 +515,7 @@ function StudentCodeTransfer({ data, commit }: { data: AcademyData; commit: Comm
     if (matchesStudentCode(studentCodeFor(record), identifier)) return true;
     if (isStudentCodeQuery(identifier)) return false;
     const phone = personPhone(record.ph);
-    return phoneNeedle.length >= 3 && phone.includes(phoneNeedle);
+    return phoneMatches(record.ph, identifier);
   };
   const matchedLeads = live(data.l).filter(matches).sort((a, b) => Number(b.ts ?? 0) - Number(a.ts ?? 0));
   const matchedStudents = live(data.m).filter(matches).sort((a, b) => {
@@ -1027,7 +1027,7 @@ function GroupForm({ data, profile, teacherAccounts, isPrivate, onCancel, commit
     if (!value) { setLookupFeedback("اكتب كود SPK أو جزءًا من رقم الهاتف."); return; }
     const phoneNeedle = personPhone(value);
     const matches = live(data.m).filter((student) => matchesStudentCode(studentCodeFor(student), value)
-      || (!isStudentCodeQuery(value) && phoneNeedle.length >= 3 && personPhone(student.ph).includes(phoneNeedle)))
+      || (!isStudentCodeQuery(value) && phoneMatches(student.ph, value)))
       .filter((student, index, all) => !all.slice(0, index).some((other) => sameStudentIdentity(other, student)))
       .sort((a, b) => Number(isActiveStudentEnrollment(b, data)) - Number(isActiveStudentEnrollment(a, data)));
     if (!matches.length) { setLoadedStudent(null); setLookupFeedback("لم أجد سجلًا بهذا الكود أو جزء الهاتف."); return; }
@@ -1247,7 +1247,7 @@ function AddStudent({ group, data, canEditPayment, commit }: { group: AcademyGro
     if (!query) { setMessage("اكتب كود العميل أو جزءًا من رقم الهاتف."); return; }
     const records: Array<Student | Lead> = [...live(data.m), ...live(data.l)];
     const candidates = records.filter((record) => matchesStudentCode(studentCodeFor(record), lookup)
-      || (!isStudentCodeQuery(lookup) && digits.length >= 3 && personPhone(record.ph).includes(digits)));
+      || (!isStudentCodeQuery(lookup) && phoneMatches(record.ph, lookup)));
     const unique = candidates.filter((record, index) => !candidates.slice(0, index).some((seen) => sameStudentIdentity(record, seen)));
     if (!unique.length) { setMessage("لم أجد عميلًا بهذا الكود أو جزء الرقم."); setLoadedCode(""); setLoadedIdentity(null); return; }
     if (unique.length > 1) { setMessage("الجزء المدخل يطابق أكثر من عميل؛ أدخل كود SPK كاملًا أو أرقامًا أكثر."); setLoadedCode(""); setLoadedIdentity(null); return; }
@@ -1764,7 +1764,7 @@ function LeadsView({ data, bucket, commit }: { data: AcademyData; bucket: "next"
   const title = bucket === "next" ? "عملاء الراوند الجاي" : "الليدز";
   const queryDigits = personPhone(query);
   const matchesCustomerQuery = (name: string, phone: string, extra = "", code = "") => `${name} ${phone} ${extra}`.toLocaleLowerCase().includes(query.toLocaleLowerCase())
-    || Boolean(!isStudentCodeQuery(query) && queryDigits && personPhone(phone).includes(queryDigits))
+    || Boolean(!isStudentCodeQuery(query) && phoneMatches(phone, query))
     || matchesStudentCode(code, query);
   const { formerCustomers, leadPool } = useMemo(() => {
     const former = formerCustomerRows(data).filter((student) => !hasActiveStudentEnrollment(student, data));
@@ -2010,7 +2010,7 @@ function FormerCustomerCard({ student, data, commit, canEdit }: { student: Stude
   };
   return <article id={"student-record-" + student.id} className="former-customer-card">
     <div className="student-card__summary former-card-summary">
-      <div className="student-card__identity"><StudentNameWithNote name={displayStudentName(student, data)} note={student.nt} /><div className="student-card__phone-line">{student.ph ? <button type="button" className="phone phone-number former-customer-phone" dir="ltr" onClick={() => void copy(student.ph ?? "", "رقم الهاتف")}>{student.ph}<Copy size={12} /></button> : <span className="phone">بدون رقم</span>}</div></div>
+      <div className="student-card__identity"><StudentNameWithNote name={displayStudentName(student, data)} note={student.nt} /><div className="student-card__phone-line">{student.ph ? <button type="button" className="phone phone-number former-customer-phone" dir="ltr" onClick={() => void copy(student.ph ?? "", "رقم الهاتف")}><bdi dir="ltr">{student.ph}</bdi><Copy size={12} /></button> : <span className="phone">بدون رقم</span>}</div></div>
       <span className="tag student-card__level">{student.lv || "بدون Level"}</span>
       <button type="button" className="tag tag--muted student-system-id code-copy" title="نسخ كود العميل" onClick={() => void copy(studentCodeFor(student), "كود العميل")}><bdi dir="ltr">{studentCodeFor(student)}</bdi><Copy size={12} /></button>
       <button type="button" className="btn btn--ghost btn--small student-card__copy-all" onClick={() => void copy([displayStudentName(student, data), student.ph || "", student.lv || "", studentCodeFor(student)].join("\t"), "بيانات الطالب")}><Copy size={13} />نسخ البيانات</button>
@@ -2732,7 +2732,7 @@ function SearchOverlay({ data, profile, onClose, onGroup, onStudent, onLead }: {
   const matchesText = (value: string) => !text || value.toLocaleLowerCase().includes(text);
   const phoneQuery = personPhone(text);
   const matchesPersonText = (name: string, phone: string, extra = "") => matchesText(`${name} ${phone} ${extra}`)
-    || Boolean(!isStudentCodeQuery(text) && phoneQuery && personPhone(phone).includes(phoneQuery));
+    || Boolean(!isStudentCodeQuery(text) && phoneMatches(phone, text));
   const studentsForGroup = (group: AcademyGroup) => live(data.m).filter((student) => student.g === group.id);
   const acceptsStudentType = (group: AcademyGroup) => !kindFilter || kindFilter === (group.p ? "private" : "group");
   const acceptsRosterFilters = (group: AcademyGroup) => {

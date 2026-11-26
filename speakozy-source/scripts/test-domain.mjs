@@ -619,6 +619,13 @@ try {
   const noEnd = { ...satTueGroup, e: undefined };
   const generated = generateSessions(noEnd);
   assert.ok(generated.length <= 8);
+  const { phoneMatches } = require(join(tempRoot, "domain/customer-stage.js"));
+  assert.ok(phoneMatches("+20 11 21592661", "0112159"), "partial search ignores +20 and leading 0");
+  assert.ok(phoneMatches("01121592661", "21592661"), "tail of a local number");
+  assert.ok(phoneMatches("+20 11 21592661", "٢١٥٩٢"), "arabic digits");
+  assert.ok(phoneMatches("01121592661", "+20 112"), "country code in the query");
+  assert.ok(!phoneMatches("01121592661", "99"), "too short query never matches");
+  assert.ok(!phoneMatches("01121592661", "0100"), "different number does not match");
   console.log("All domain tests passed: schedules, two-week student reminders, weekly lead reminders, no-renewal cohort continuity, former-customer copies, archive boundaries, capacity, finance roles, and attendance snapshot merge/conflict handling.");
 } finally {
   rmSync(tempRoot, { recursive: true, force: true });
