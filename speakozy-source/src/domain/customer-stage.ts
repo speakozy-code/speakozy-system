@@ -111,3 +111,15 @@ export function endedPrivateWithoutPlace(groupId: string, data: AcademyData): bo
   if (!group || group.x || !group.p) return false;
   return live(data.m).some((student) => student.g === groupId && !student.movedToTab && !isActiveStudentEnrollment(student, data) && customerStage(student, data) === "none");
 }
+
+/** Partial phone search: ignores spaces, "+", dashes, Arabic digits and the leading 0 / country code differences (0112159 finds +20 11 21592661). */
+export function phoneMatches(phone: string | undefined, query: string | undefined): boolean {
+  const q = personPhone(query);
+  if (q.replace(/^0+/, "").length < 3) return false;
+  const d = personPhone(phone);
+  if (!d) return false;
+  const qTrim = q.replace(/^0+/, "");
+  const dTrim = d.replace(/^0+/, "");
+  const qLocal = qTrim.startsWith("20") && qTrim.length >= 5 ? qTrim.slice(2) : qTrim;
+  return d.includes(q) || dTrim.includes(qTrim) || dTrim.includes(qLocal);
+}
