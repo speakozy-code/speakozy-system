@@ -482,3 +482,10 @@
 button.teacher-free__chip { cursor: pointer; }
 button.teacher-free__chip:hover { background: #cdf1da; }
 .teacher-free__day small { color: #6b7280; overflow-wrap: anywhere; }
+
+/* Teacher work days editor */
+.teacher-workdays__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 8px; margin: 10px 0; }
+.teacher-workdays__row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--line, #e5e7eb); border-radius: 12px; min-width: 0; }
+.teacher-workdays__row.is-on { border-color: #86d6a5; background: #f3fbf6; }
+.teacher-workdays__day { min-width: 92px; font-weight: 700; display: inline-flex; align-items: center; gap: 6px; }
+.teacher-workdays__row input[type="time"] { max-width: 130px; }
