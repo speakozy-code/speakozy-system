@@ -158,6 +158,8 @@ export interface FinanceRow {
 export interface TeacherHours {
   name: string;
   weeklyHours?: number;
+  /** Working days by weekday number (0=Sunday..6=Saturday) with the hours the teacher works. Absent = not configured. */
+  workDays?: Record<string, { from: string; to: string }>;
   active?: boolean;
   archivedAt?: number;
   deletedAt?: number;

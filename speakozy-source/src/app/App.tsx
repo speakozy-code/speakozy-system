@@ -9,7 +9,7 @@ import type { AcademyData, AcademyGroup, AppNotice, AttendanceStatus, Lead, Prof
 import { canAccessFinance, canAccessMarketingAnalytics, isMarketingRole } from "../domain/permissions";
 import { activeAttendanceRecords, activeGroups, activeStudentsOf, archiveTeacher, attendanceFor, canAddStudentToGroup, canAssignTeacher, colourForGroup, copyStudentForGroup, currentStudentCounts, expenseForMonth, formerStudents, formatDate, formatTime, groupDays, groupLabel, groupTime, incomeForMonth, incomeStudentsByKindForMonth, incomeStudentsForMonth, isEnrolledStudent, isRoundActive, isStudentCodeQuery, isTeacherArchived, isTeacherDeleted, isTeacherNameArchived, isTerminalLead, leadBucket, leadCategory, leadFollowupDate, LEAD_FOLLOWUP_OPTIONS, LEVEL_COUNTS, LEVELS, live, matchesStudentCode, monthKey, nonArchivedGroups, normalise, parseIsoDate, privateGroupCanAccept, removeStudentAttendance, restoreTeacher, roundName, safeCopy, saveTeacherWeeklyHours, sortLeads, studentKind, studentKindLabel, studentSourceLabel, STUDENT_SOURCES, studentsInNonArchivedGroups, studentsInRound, studentsOf, teacherNames, toIsoDate, uid, uniquePhoneNumbers, WEEKDAYS } from "../domain/utils";
 import { allTeacherScheduleConflicts, cancelSession, durationHours, ensureEightActiveSessions, feedbackSessionsDue, generateSessions, monthTeacherHours, plannedGroupEndDate, rescheduleGroupPreservingAttendance, rescheduleSession, restoreSession, scheduledSessionsOnDate, sessionsOf, teacherScheduleConflicts, teacherSessionsForMonth, weeklyScheduledHours } from "../domain/schedule";
-import { minutesToTime, teacherWeek } from "../domain/teacher-availability";
+import { minutesToTime, saveTeacherWorkDays, teacherWeek, teacherWorkDays } from "../domain/teacher-availability";
 import { isGroupOperationalToday } from "../domain/lifecycle";
 import { studentJourney } from "../domain/student-journey";
 import { endedPrivateWithoutPlace, hasActiveStudentEnrollment, isActiveStudentEnrollment, personPhone, phoneMatches, samePerson, sameStudentIdentity, studentCodeFor, type PersonRecord } from "../domain/customer-stage";
@@ -31,7 +31,7 @@ const TABS: TabDefinition[] = [
   { id: "next", label: "عملاء الراوند الجاي", icon: CalendarDays },
   { id: "leads", label: "الليدز", icon: UserRoundIcon },
   { id: "attendance", label: "الحضور والغياب", icon: ListChecks },
-  { id: "teachers", label: "ساعات المدرسين", icon: CalendarDays },
+  { id: "teachers", label: "المدرسين", icon: CalendarDays },
   { id: "finance", label: "الإيرادات والمصروفات", icon: DollarSign, owner: true },
   { id: "retention", label: "الريتينشن", icon: BarChart3 },
   { id: "security", label: "الأمان والنسخ", icon: ShieldCheck },
@@ -987,11 +987,11 @@ function clockLabel(minutes: number) { return minutes >= 1440 ? "12:00 ص" : for
 function TeacherFreeTime({ data, teacher, onPick, ignoreGroupId }: { data: AcademyData; teacher: string; onPick?: (day: number, from: number, to: number) => void; ignoreGroupId?: string }) {
   const week = useMemo(() => teacherWeek(data, teacher, toIsoDate(), ignoreGroupId), [data, teacher, ignoreGroupId]);
   return <div className="field span-2 teacher-free">
-    <label>مواعيد {teacher} الفاضية (من 5 مساءً لـ12 بالليل)</label>
+    <label>مواعيد {teacher} الفاضية{teacherWorkDays(data, teacher) ? " (داخل أيام وساعات عمله)" : " (لسه ما اتحددتش أيام عمله: من 5 مساءً لـ12 بالليل)"}</label>
     <div className="teacher-free__grid">{week.map((day) => <div className="teacher-free__day" key={day.day}>
       <strong>{day.name}</strong>
       <div className="teacher-free__ranges">
-        {day.free.length ? day.free.map((range) => onPick
+        {!day.works ? <span className="tag tag--muted">إجازة</span> : day.free.length ? day.free.map((range) => onPick
           ? <button type="button" className="teacher-free__chip" key={range.from} onClick={() => onPick(day.day, range.from, range.to)} title="اضغط لتعبئة الموعد">{clockLabel(range.from)} – {clockLabel(range.to)}</button>
           : <span className="teacher-free__chip" key={range.from}>{clockLabel(range.from)} – {clockLabel(range.to)}</span>) : <span className="tag tag--danger">مشغول</span>}
       </div>
@@ -2250,6 +2250,34 @@ function TeacherSessionSchedule({ groups, data, month, onOpenGroup }: { groups: 
   return <details className="section teacher-month-sessions compact-section"><summary className="section-head compact-section__summary"><div><h2>جلسات المدرس في الشهر</h2><p>الجلسات الملغاة تظهر هنا ولا تُحتسب ضمن ساعات العمل.</p></div><span className="tag tag--muted">{rows.length - cancelledCount} نشطة · {cancelledCount} ملغاة</span><ChevronDown size={17} /></summary>{rows.length ? <div className="teacher-sessions-wrap"><table className="teacher-sessions-table"><thead><tr><th>الجروب / الطالب</th><th>التاريخ</th><th>الوقت</th><th>المدة المحسوبة</th><th>الحالة</th></tr></thead><tbody>{rows.map(({ group, session, suggested }, index) => { const date = String(session.d ?? session.k).slice(0, 10); const cancelled = Boolean(session.c); return <tr key={`${group.id}:${date}:${index}`} className={cancelled ? "teacher-session-cancelled" : suggested ? "teacher-session-proposed" : ""}><td><button type="button" className="hours-group-link" title={label(group)} onClick={() => onOpenGroup(group)}>{label(group)}</button></td><td>{formatDate(date, true)}</td><td>{groupTime(group)}</td><td>{cancelled ? 0 : durationHours(group)} ساعة</td><td><span className={`tag ${cancelled ? "tag--danger" : suggested ? "tag--warning" : ""}`}>{cancelled ? "ملغاة" : suggested ? "مقترحة" : "مجدولة"}</span></td></tr>; })}</tbody></table></div> : <div className="empty">لا توجد جلسات لهذا المدرس في الشهر المحدد.</div>}</details>;
 }
 
+function TeacherWorkDays({ data, teacher, commit }: { data: AcademyData; teacher: string; commit: Commit }) {
+  const saved = teacherWorkDays(data, teacher);
+  const initial = () => Object.fromEntries(WEEKDAYS.map(({ d }) => [String(d), { on: saved ? Boolean(saved[String(d)]) : false, from: saved?.[String(d)]?.from ?? "17:00", to: saved?.[String(d)]?.to ?? "00:00" }]));
+  const [draft, setDraft] = useState<Record<string, { on: boolean; from: string; to: string }>>(initial);
+  const [error, setError] = useState("");
+  const update = (day: number, patch: Partial<{ on: boolean; from: string; to: string }>) => { setError(""); setDraft((current) => ({ ...current, [String(day)]: { ...current[String(day)], ...patch } })); };
+  const save = () => {
+    const days: Record<string, { from: string; to: string }> = {};
+    for (const { d, n } of WEEKDAYS) {
+      const row = draft[String(d)];
+      if (!row.on) continue;
+      const to = row.to === "00:00" ? "24:00" : row.to;
+      if (!row.from || !row.to || (to !== "24:00" && to <= row.from)) { setError(`راجع ساعات يوم ${n}: النهاية لازم تكون بعد البداية.`); return; }
+      days[String(d)] = { from: row.from, to: row.to };
+    }
+    commit((next) => saveTeacherWorkDays(next, teacher, days), "تم حفظ أيام وساعات عمل المدرس.");
+  };
+  return <section className="section teacher-workdays">
+    <div className="section-head"><div><h2>أيام وساعات عمل {teacher}</h2><p>{saved ? "الجروبات الجديدة هتعرض مواعيده الفاضية جوه الأيام والساعات دي بس." : "لسه ما اتحددتش؛ لحد ما تحفظ هيظهر له كل الأيام من 5 مساءً لـ12 بالليل."}</p></div><button className="btn btn--small" type="button" onClick={save}>حفظ</button></div>
+    <div className="teacher-workdays__grid">{WEEKDAYS.map(({ d, n }) => { const row = draft[String(d)]; return <div className={`teacher-workdays__row ${row.on ? "is-on" : ""}`} key={d}>
+      <label className="teacher-workdays__day"><input type="checkbox" checked={row.on} onChange={(event) => update(d, { on: event.target.checked })} /> {n}</label>
+      {row.on ? <><label>من <input type="time" value={row.from} onChange={(event) => update(d, { from: event.target.value })} /></label><label>إلى <input type="time" value={row.to} onChange={(event) => update(d, { to: event.target.value })} /></label></> : <span className="tag tag--muted">إجازة</span>}
+    </div>; })}</div>
+    <small>اكتب النهاية 12:00 ص لو بيشتغل لحد منتصف الليل.</small>
+    {error && <div className="notice notice--warning" role="alert">{error}</div>}
+  </section>;
+}
+
 function TeachersView({ data, profile, commit, teacherAccounts, onDeleteTeacher, onOpenGroup }: { data: AcademyData; profile: Profile; commit: Commit; teacherAccounts: TeacherAccount[]; onDeleteTeacher: (name: string) => Promise<boolean>; onOpenGroup: (group: AcademyGroup) => void }) {
   const activeDirectory = useMemo(() => teacherNames(data, teacherAccounts), [data, teacherAccounts]);
   const archivedDirectory = useMemo(() => [...new Map(data.teacherHours.filter((row) => isTeacherArchived(row) && !isTeacherDeleted(row) && row.name.trim()).map((row) => [normalise(row.name), row.name.trim()])).values()].sort((a, b) => a.localeCompare(b, "ar")), [data.teacherHours]);
@@ -2341,9 +2369,10 @@ function TeachersView({ data, profile, commit, teacherAccounts, onDeleteTeacher,
     setTeacher(name);
   };
   return <>
-    <PageHead title={profile.role === "teacher" ? "جروباتي" : "ساعات المدرسين"} description={profile.role === "teacher" ? "الجدول الأسبوعي والساعات الشهرية لجروباتك والـPrivate المسندة إليك." : "حدد ساعات العمل الأسبوعية، وأضف المدرسين أو أرشفهم أو احذفهم من النظام."} />
+    <PageHead title={profile.role === "teacher" ? "جروباتي" : "المدرسين"} description={profile.role === "teacher" ? "الجدول الأسبوعي والساعات الشهرية لجروباتك والـPrivate المسندة إليك." : "حدد أيام وساعات عمل كل مدرس، وأضف المدرسين أو أرشفهم أو احذفهم من النظام."} />
     {profile.role !== "teacher" && <section className="section teacher-manager"><div className="section-head"><div><h2>إدارة قائمة المدرسين</h2><p>الأرشفة قابلة للاستعادة. الحذف يوقف حساب المدرس داخل النظام، بينما تظل بيانات الطلاب والجروبات والحضور محفوظة.</p></div><span className="tag tag--muted">{activeDirectory.length} نشط</span></div><div className="toolbar teacher-manager__add"><input className="search-input" value={newTeacher} onChange={(event) => setNewTeacher(event.target.value)} placeholder="اسم مدرس جديد" aria-label="اسم مدرس جديد" /><button type="button" className="btn" disabled={!newTeacher.trim()} onClick={addTeacher}><Plus size={16} />إضافة مدرس للقائمة</button></div>{directoryMessage && <div className="notice" role="status">{directoryMessage}</div>}<div className="teacher-directory">{activeDirectory.length ? activeDirectory.map((name) => { const assignments = activeAssignments(name).length; return <div className="teacher-directory__row" key={normalise(name)}><div><strong>{name}</strong><p>{hasAccount(name) ? "حساب مدرس متزامن" : "اسم يدوي للقائمة"} · {assignments} جروب/Private نشط</p></div><div className="toolbar"><button type="button" className="btn btn--ghost btn--small" onClick={() => archiveTeacherEntry(name)}>أرشفة المدرس</button>{profile.role === "owner" && <button type="button" className="btn btn--ghost btn--small" onClick={() => void deleteTeacherEntry(name)}><Trash2 size={14} />حذف من النظام</button>}</div></div>; }) : <div className="empty">أضف أول مدرس ليظهر في قوائم إنشاء الجروب والـPrivate.</div>}</div>{archivedDirectory.length > 0 && <div className="teacher-directory teacher-directory--inactive"><h3>مدرسون في الأرشيف</h3><p>الحساب والتكليفات محفوظة؛ المدرس وجلساته مخفيان من الحضور والتقارير حتى الاستعادة.</p>{archivedDirectory.map((name) => <div className="teacher-directory__row" key={normalise(name)}><div><strong>{name}</strong><p>{activeAssignments(name).length} جروب/Private قائم محفوظ دون تغيير.</p></div><div className="toolbar"><button type="button" className="btn btn--ghost btn--small" onClick={() => restoreArchivedTeacher(name)}>استعادة من الأرشيف</button>{profile.role === "owner" && <button type="button" className="btn btn--ghost btn--small" onClick={() => void deleteTeacherEntry(name)}><Trash2 size={14} />حذف من النظام</button>}</div></div>)}</div>}</section>}
     {profile.role !== "teacher" && <section className="section"><div className="toolbar"><select className="search-input" value={teacher} onChange={(event) => { setTeacher(event.target.value); const newRecord = data.teacherHours.find((row) => normalise(row.name) === normalise(event.target.value)); setWeekly(String(newRecord?.weeklyHours ?? "")); }}><option value="">اختر مدرسًا للتقرير</option>{reportNames.map((name) => <option key={normalise(name)} value={name}>{name}{archivedDirectory.some((item) => normalise(item) === normalise(name)) ? " · مؤرشف" : ""}</option>)}</select><input className="search-input" type="number" min="0" max="80" step="0.5" placeholder="ساعات أسبوعيًا" value={weekly} onChange={(event) => setWeekly(event.target.value)} /><button className="btn" disabled={!teacher} onClick={saveWeekly}>حفظ الساعات</button></div></section>}
+    {profile.role !== "teacher" && teacher && <TeacherWorkDays key={teacher} data={data} teacher={teacher} commit={commit} />}
     <details className="section compact-section teacher-month-summary">
       <summary className="section-head compact-section__summary"><div><h2>ملخص {teacher || "المدرس"}</h2><p>يعرض جروبات المدرس التي لها جلسة في الشهر المحدد، حتى لو بدأت في شهر سابق.</p></div><div className="field"><label className="sr-only" htmlFor="work-month">الشهر</label><input id="work-month" type="month" value={month} onClick={(event) => event.stopPropagation()} onChange={(event) => { setMonth(event.target.value); setRoundFilter(""); }} /></div><ChevronDown size={17} /></summary>
       <div className="toolbar teacher-month-filter"><label className="field"><span>راوندات الشهر</span><select className="search-input" aria-label="تصفية راوندات المدرس حسب الشهر" value={roundFilter} onChange={(event) => setRoundFilter(event.target.value)}><option value="">كل راوندات الشهر</option>{roundOptions.map((round) => <option key={round.id} value={round.id}>{roundName(round)}</option>)}{includesPrivate && <option value="pv">Private</option>}</select></label></div>

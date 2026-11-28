@@ -1,10 +1,11 @@
-import type { AcademyData, AcademyGroup } from "./types";
-import { activeGroups, endMinutes, groupDays, groupStartMinutes, normalise, toIsoDate, WEEKDAYS } from "./utils";
+import type { AcademyData, AcademyGroup, TeacherHours } from "./types";
+import { activeGroups, endMinutes, groupDays, groupStartMinutes, normalise, timeMinutes, toIsoDate, WEEKDAYS } from "./utils";
 import { plannedGroupEndDate } from "./schedule";
 
 export interface BusyBlock { groupId: string; label: string; from: number; to: number; isPrivate: boolean }
 export interface FreeRange { from: number; to: number }
-export interface TeacherDay { day: number; name: string; busy: BusyBlock[]; free: FreeRange[] }
+export interface TeacherDay { day: number; name: string; busy: BusyBlock[]; free: FreeRange[]; works: boolean }
+export type WorkDays = NonNullable<TeacherHours["workDays"]>;
 
 export const AVAILABILITY_FROM = 17 * 60;
 export const AVAILABILITY_TO = 24 * 60;
@@ -25,10 +26,36 @@ function occupyingGroups(data: AcademyData, teacher: string, today: string, igno
   });
 }
 
-/** Weekly picture for one teacher between 5 PM and midnight: what is taken and what is free. */
+export function teacherWorkDays(data: AcademyData, teacher: string): WorkDays | null {
+  const row = data.teacherHours.find((item) => normalise(item.name) === normalise(teacher));
+  return row?.workDays && typeof row.workDays === "object" ? row.workDays : null;
+}
+
+/** Save the weekdays and hours a teacher works. Days left out are days off. */
+export function saveTeacherWorkDays(data: AcademyData, name: string, workDays: WorkDays): void {
+  const existing = data.teacherHours.find((row) => normalise(row.name) === normalise(name));
+  if (existing) { existing.workDays = workDays; existing.updatedAt = Date.now(); return; }
+  data.teacherHours.push({ name, workDays, active: true, updatedAt: Date.now() });
+}
+
+function workWindow(range: { from: string; to: string }): FreeRange | null {
+  const from = timeMinutes(range.from);
+  let to = timeMinutes(range.to);
+  if (to === 0) to = 1440;
+  return from >= 0 && to > from ? { from, to: Math.min(to, 1440) } : null;
+}
+
+/**
+ * Weekly picture for one teacher: the hours he works (from his work days; if none were set, every day
+ * 5 PM-12 AM) minus what his running or upcoming groups and Private already take.
+ */
 export function teacherWeek(data: AcademyData, teacher: string, today = toIsoDate(), ignoreGroupId?: string): TeacherDay[] {
   const groups = occupyingGroups(data, teacher, today, ignoreGroupId);
+  const configured = teacherWorkDays(data, teacher);
   return WEEKDAYS.map(({ d, n }) => {
+    const window: FreeRange | null = configured
+      ? (configured[String(d)] ? workWindow(configured[String(d)]) : null)
+      : { from: AVAILABILITY_FROM, to: AVAILABILITY_TO };
     const busy: BusyBlock[] = groups.flatMap((group) => {
       if (!groupDays(group).includes(d)) return [];
       const from = groupStartMinutes(group);
@@ -37,13 +64,16 @@ export function teacherWeek(data: AcademyData, teacher: string, today = toIsoDat
       return [{ groupId: group.id, label: group.p ? `Private · ${group.lv ?? ""}` : String(group.lv ?? "جروب"), from, to, isPrivate: Boolean(group.p) }];
     }).sort((a, b) => a.from - b.from);
     const free: FreeRange[] = [];
-    let cursor = AVAILABILITY_FROM;
-    for (const block of busy) {
-      if (block.from > cursor) free.push({ from: cursor, to: Math.min(block.from, AVAILABILITY_TO) });
-      cursor = Math.max(cursor, block.to);
-      if (cursor >= AVAILABILITY_TO) break;
+    if (window) {
+      let cursor = window.from;
+      for (const block of busy) {
+        if (block.to <= cursor) continue;
+        if (block.from > cursor) free.push({ from: cursor, to: Math.min(block.from, window.to) });
+        cursor = Math.max(cursor, block.to);
+        if (cursor >= window.to) break;
+      }
+      if (cursor < window.to) free.push({ from: cursor, to: window.to });
     }
-    if (cursor < AVAILABILITY_TO) free.push({ from: cursor, to: AVAILABILITY_TO });
-    return { day: d, name: n, busy, free: free.filter((range) => range.to > range.from) };
+    return { day: d, name: n, busy, free: free.filter((range) => range.to > range.from), works: Boolean(window) };
   });
 }
